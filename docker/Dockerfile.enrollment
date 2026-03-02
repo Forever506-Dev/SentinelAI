@@ -1,0 +1,43 @@
+# ============================================================
+# SentinelAI Enrollment Service — Dockerfile (Python FastAPI)
+# ============================================================
+# Handles agent enrollment, mTLS certificate issuance/rotation,
+# and revocation via NATS broadcast.
+# ============================================================
+
+FROM python:3.11-slim
+
+LABEL maintainer="SentinelAI Team"
+LABEL description="SentinelAI Enrollment Service (mTLS CA, Agent Onboarding)"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r sentinel && useradd -r -g sentinel -d /app -s /bin/false sentinel
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt* main.py ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi \
+    && pip install --no-cache-dir \
+        fastapi uvicorn cryptography nats-py httpx structlog
+
+COPY . .
+
+# Mount point for CA keys and certs
+VOLUME ["/app/certs"]
+
+RUN chown -R sentinel:sentinel /app
+
+USER sentinel
+
+# gRPC / HTTP enrollment port
+EXPOSE 50052
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:50052/health 2>/dev/null || exit 0
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "50052"]

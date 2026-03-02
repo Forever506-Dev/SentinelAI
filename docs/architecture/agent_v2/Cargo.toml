@@ -1,0 +1,150 @@
+[package]
+name = "sentinel-agent"
+version = "2.0.0"
+edition = "2021"
+description = "SentinelAI Endpoint Agent — Production-grade EDR telemetry collector"
+license = "MIT"
+rust-version = "1.75"
+
+[[bin]]
+name = "sentinel-agent"
+path = "src/main.rs"
+
+[features]
+default = ["platform-auto"]
+# Automatically select platform features based on target OS.
+platform-auto = []
+# Windows ETW support.
+etw = ["windows"]
+# Linux eBPF support.
+ebpf = ["libbpf-rs", "libbpf-cargo"]
+# QUIC transport fallback.
+quic = ["quinn"]
+# YARA scanning support.
+yara-scan = ["yara"]
+
+[dependencies]
+# ── Async Runtime ──────────────────────────────────────────────
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+
+# ── gRPC + Protobuf ───────────────────────────────────────────
+tonic = { version = "0.11", features = ["tls", "tls-roots"] }
+prost = "0.12"
+prost-types = "0.12"
+
+# ── TLS / mTLS ────────────────────────────────────────────────
+rustls = { version = "0.22", features = ["ring"] }
+rustls-pemfile = "2"
+rcgen = "0.12"                 # CSR generation for enrollment
+x509-parser = "0.16"          # Certificate validation
+
+# ── QUIC fallback transport ───────────────────────────────────
+quinn = { version = "0.10", optional = true }
+
+# ── Serialization ─────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Configuration ─────────────────────────────────────────────
+toml = "0.8"
+dirs = "5"
+
+# ── Logging & Tracing ────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# ── Hashing ───────────────────────────────────────────────────
+sha2 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+
+# ── UUID (v4 for random, v7 for time-ordered event IDs) ──────
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# ── Time ──────────────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde"] }
+
+# ── System Information (fallback polling) ─────────────────────
+sysinfo = "0.30"
+
+# ── File System Watching ──────────────────────────────────────
+notify = "6"
+
+# ── Lock-free Data Structures ─────────────────────────────────
+crossbeam = "0.8"
+dashmap = "5"
+
+# ── Bloom Filter (IOC matching) ───────────────────────────────
+probabilistic-collections = "0.7"
+
+# ── YARA integration ─────────────────────────────────────────
+yara = { version = "0.25", optional = true }
+
+# ── Disk buffer (event persistence during backend outage) ─────
+# Using a simple append-only WAL implementation.
+# In production, consider redb or sled for more robustness.
+redb = "2"
+
+# ── HTTP client (for enrollment bootstrap only) ──────────────
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# ── Zstd compression for event batches ───────────────────────
+zstd = "0.13"
+
+# ── Aho-Corasick (fast multi-pattern string matching for IOCs) ─
+aho-corasick = "1"
+
+# ═══════════════════════════════════════════════════════════════
+# Platform-specific dependencies
+# ═══════════════════════════════════════════════════════════════
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52", features = [
+    # ETW
+    "Win32_System_Diagnostics_Etw",
+    # Process information
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    # Network
+    "Win32_NetworkManagement_IpHelper",
+    # Security
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    # Service Control
+    "Win32_System_Services",
+    # Registry
+    "Win32_System_Registry",
+    # Foundation
+    "Win32_Foundation",
+    # Memory (for process mitigation policies)
+    "Win32_System_Memory",
+]}
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["net", "process", "signal", "ptrace"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libbpf-rs = { version = "0.23", optional = true }
+
+[build-dependencies]
+tonic-build = "0.11"
+prost-build = "0.12"
+libbpf-cargo = { version = "0.23", optional = true }
+
+# ═══════════════════════════════════════════════════════════════
+# Release profile
+# ═══════════════════════════════════════════════════════════════
+
+[profile.release]
+opt-level = "z"        # Optimize for binary size
+lto = true             # Link-time optimization
+codegen-units = 1      # Single codegen unit for better optimization
+strip = true           # Strip debug symbols
+panic = "abort"        # Abort on panic (smaller binary, no unwinding)
+
+[profile.release-debug]
+inherits = "release"
+debug = true           # Include debug info for profiling
+strip = false

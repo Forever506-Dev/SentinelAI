@@ -1,0 +1,57 @@
+# ============================================================
+# SentinelAI Panel — Multi-stage Dockerfile (Next.js Standalone)
+# ============================================================
+# Build:   docker build -f docker/Dockerfile.panel -t sentinelai-panel ./panel
+# Run:     docker run -p 3000:3000 sentinelai-panel
+# ============================================================
+# Requires next.config.mjs to have: output: "standalone"
+
+# ── Stage 1: Dependencies ──────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --prefer-offline; else npm install; fi
+
+# ── Stage 2: Build ─────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build-time env vars (override via --build-arg)
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+RUN npm run build
+
+# ── Stage 3: Runtime ───────────────────────────────────────
+FROM node:20-alpine AS runtime
+
+LABEL maintainer="SentinelAI Team"
+LABEL description="SentinelAI EDR Web Panel (Next.js)"
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# Non-root user
+RUN addgroup --system --gid 1001 sentinel \
+    && adduser --system --uid 1001 sentinel
+
+# Copy standalone output from Next.js build
+COPY --from=builder --chown=sentinel:sentinel /app/.next/standalone ./
+COPY --from=builder --chown=sentinel:sentinel /app/.next/static ./.next/static
+COPY --from=builder --chown=sentinel:sentinel /app/public ./public
+
+USER sentinel
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://localhost:3000/ || exit 1
+
+CMD ["node", "server.js"]

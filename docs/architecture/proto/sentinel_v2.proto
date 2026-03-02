@@ -1,0 +1,779 @@
+// SentinelAI Telemetry Protocol v2
+//
+// Production-grade event schema for EDR telemetry.
+// Designed for: Elasticsearch indexing, NATS streaming, cross-platform agents.
+//
+// Key design decisions:
+//   - Process GUID (not just PID) for global correlation
+//   - Monotonic + wall clock timestamps for ordering + display
+//   - Risk score at event creation time for fast UI filtering
+//   - Strict field set to prevent ES mapping explosion
+//   - Oneof payload for type-safe event bodies
+//
+// Breaking changes from v1:
+//   - host_guid replaces hostname as primary identity
+//   - process_guid/parent_process_guid replace PID-only fields
+//   - user_sid/user_uid replace generic "user" string
+//   - integrity_level added (Windows-specific, ignored on Linux)
+//   - event_source tracks which telemetry provider generated the event
+//   - risk_score (0-100) assigned by local detection engine
+//   - mitre_techniques is repeated (events can match multiple techniques)
+
+syntax = "proto3";
+
+package sentinel.v2;
+
+option java_package = "io.sentinel.proto.v2";
+option go_package = "github.com/sentinelai/proto/v2;sentinelv2";
+
+import "google/protobuf/timestamp.proto";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE IDENTITY
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Stable host identity that survives agent restarts and reinstalls.
+// Generated during enrollment, stored alongside the agent certificate.
+message HostIdentity {
+  // Globally unique, stable across reinstalls if re-enrolled.
+  // Format: UUIDv4, assigned during enrollment.
+  string host_guid = 1;
+
+  // Human-readable hostname (informational, not used for identity).
+  string hostname = 2;
+
+  // Tenant identifier (from agent certificate O= field).
+  string tenant_id = 3;
+
+  // Operating system details.
+  string os_type = 4;      // "windows" | "linux" | "macos" | "android"
+  string os_version = 5;   // "10.0.19045" | "6.1.0-generic" | "14.2"
+  string architecture = 6; // "x86_64" | "aarch64"
+
+  // Agent version for compatibility checks.
+  string agent_version = 7;
+
+  // Machine GUID or hardware fingerprint for re-enrollment detection.
+  // Windows: HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
+  // Linux: /etc/machine-id
+  string machine_id = 8;
+
+  // Network interfaces (for lateral movement correlation).
+  repeated NetworkInterface interfaces = 9;
+
+  // Arbitrary metadata (domain, OU, tags from enrollment).
+  map<string, string> labels = 10;
+}
+
+message NetworkInterface {
+  string name = 1;           // "eth0", "Ethernet 2"
+  string mac_address = 2;    // "00:1A:2B:3C:4D:5E"
+  repeated string ipv4 = 3;  // ["192.168.1.100"]
+  repeated string ipv6 = 4;  // ["fe80::1"]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROCESS IDENTITY
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Deterministic process GUID: SHA-256(agent_guid + pid + start_time_ns)[0:16]
+// This is globally unique and stable for the lifetime of the process.
+// Unlike PIDs, process GUIDs are never recycled.
+message ProcessIdentity {
+  // Globally unique process identifier (see formula above).
+  string process_guid = 1;
+
+  // Parent process GUID (for kill-chain reconstruction).
+  // Empty string for processes whose parent has exited.
+  string parent_process_guid = 2;
+
+  // OS-level PID (informational — do NOT use for correlation).
+  uint32 pid = 3;
+
+  // OS-level parent PID (informational).
+  uint32 ppid = 4;
+
+  // Session ID (Windows: session, Linux: SID).
+  uint32 session_id = 5;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// USER IDENTITY
+// ═══════════════════════════════════════════════════════════════════════════
+
+message UserIdentity {
+  // Windows: SID string "S-1-5-21-..."
+  // Linux/macOS: UID as string "1000"
+  string user_id = 1;
+
+  // Resolved username "DOMAIN\user" or "root"
+  string username = 2;
+
+  // Windows integrity level.
+  IntegrityLevel integrity_level = 3;
+
+  // Windows: token elevation type.
+  // Linux: effective capabilities bitmask (hex string).
+  string elevation_info = 4;
+}
+
+enum IntegrityLevel {
+  INTEGRITY_UNKNOWN = 0;
+  INTEGRITY_UNTRUSTED = 1;
+  INTEGRITY_LOW = 2;
+  INTEGRITY_MEDIUM = 3;
+  INTEGRITY_HIGH = 4;
+  INTEGRITY_SYSTEM = 5;
+  INTEGRITY_PROTECTED = 6;  // PPL
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TIMESTAMPS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Dual-timestamp model:
+// - wall_clock: absolute time for display and cross-agent correlation
+// - monotonic_ns: relative time for intra-agent event ordering
+//
+// Wall clock can jump (NTP, manual change). Monotonic never goes backward.
+message EventTimestamps {
+  // Wall clock time of the event (UTC).
+  google.protobuf.Timestamp wall_clock = 1;
+
+  // Monotonic nanoseconds since agent boot.
+  // Windows: QueryPerformanceCounter
+  // Linux: CLOCK_MONOTONIC_RAW / bpf_ktime_get_boot_ns
+  uint64 monotonic_ns = 2;
+
+  // Time the agent processed the event (may differ from wall_clock
+  // if the event was buffered due to backpressure).
+  google.protobuf.Timestamp processed_at = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EVENT ENVELOPE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Top-level event wrapper. Every telemetry event is wrapped in this.
+message TelemetryEvent {
+  // Unique event ID (UUIDv7 — time-ordered for efficient indexing).
+  string event_id = 1;
+
+  // Event classification.
+  EventCategory category = 2;
+  string action = 3;  // "create" | "terminate" | "modify" | "connect" | etc.
+
+  // Which telemetry provider generated this event.
+  EventSource source = 4;
+
+  // Timestamps.
+  EventTimestamps timestamps = 5;
+
+  // Host identity (sent once per batch, referenced by host_guid).
+  string host_guid = 6;
+
+  // Risk score assigned by local detection engine (0 = benign, 100 = critical).
+  // 0 means no rules matched. Non-zero means at least one rule triggered.
+  uint32 risk_score = 7;
+
+  // MITRE ATT&CK technique IDs matched by local detection.
+  repeated string mitre_techniques = 8;
+
+  // Tags applied by the event pipeline (e.g., "noisy", "lateral_movement").
+  repeated string tags = 9;
+
+  // Type-specific payload.
+  oneof payload {
+    ProcessEvent process_event = 20;
+    FileEvent file_event = 21;
+    NetworkEvent network_event = 22;
+    DnsEvent dns_event = 23;
+    AuthEvent auth_event = 24;
+    RegistryEvent registry_event = 25;
+    ModuleLoadEvent module_load_event = 26;
+    SystemEvent system_event = 27;
+    TamperEvent tamper_event = 28;
+  }
+}
+
+enum EventCategory {
+  CATEGORY_UNSPECIFIED = 0;
+  CATEGORY_PROCESS = 1;
+  CATEGORY_FILE = 2;
+  CATEGORY_NETWORK = 3;
+  CATEGORY_DNS = 4;
+  CATEGORY_AUTH = 5;
+  CATEGORY_REGISTRY = 6;
+  CATEGORY_MODULE_LOAD = 7;
+  CATEGORY_SYSTEM = 8;
+  CATEGORY_TAMPER = 9;     // Self-protection events
+}
+
+enum EventSource {
+  SOURCE_UNSPECIFIED = 0;
+  SOURCE_ETW = 1;           // Windows ETW kernel providers
+  SOURCE_EBPF = 2;          // Linux eBPF probes
+  SOURCE_AUDIT = 3;         // Linux auditd / Android audit
+  SOURCE_SYSINFO = 4;       // Polling-based fallback (sysinfo crate)
+  SOURCE_FSNOTIFY = 5;      // File system notification (inotify/ReadDirectoryChanges)
+  SOURCE_PROCFS = 6;        // /proc filesystem parsing
+  SOURCE_AGENT_INTERNAL = 7; // Agent self-generated (heartbeat, tamper, canary)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EVENT PAYLOADS
+// ═══════════════════════════════════════════════════════════════════════════
+
+message ProcessEvent {
+  ProcessIdentity identity = 1;
+
+  // Executable details.
+  string name = 2;          // "powershell.exe"
+  string exe_path = 3;      // "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+  string command_line = 4;  // Full command line including arguments
+
+  // File hashes of the executable (computed asynchronously if not cached).
+  FileHashes exe_hashes = 5;
+
+  // User context.
+  UserIdentity user = 6;
+
+  // Resource usage (for anomaly detection).
+  uint64 memory_bytes = 7;
+  float cpu_percent = 8;
+
+  // Thread count at time of event (useful for injection detection).
+  uint32 thread_count = 9;
+
+  // Handle count (Windows — high handle count can indicate resource exhaustion).
+  uint32 handle_count = 10;
+
+  // Process creation flags (Windows: CREATE_SUSPENDED, etc.).
+  uint32 creation_flags = 11;
+
+  // Current working directory.
+  string working_directory = 12;
+
+  // Process start time (for GUID generation).
+  google.protobuf.Timestamp start_time = 13;
+
+  // Exit code (only for terminate events).
+  int32 exit_code = 14;
+}
+
+message FileEvent {
+  // File path (normalized: forward slashes, no trailing separators).
+  string path = 1;
+
+  // For rename events: the original path.
+  string old_path = 2;
+
+  // File hashes (computed for create/modify, empty for delete).
+  FileHashes hashes = 3;
+
+  // File size in bytes.
+  uint64 size = 4;
+
+  // Process that performed the file operation.
+  ProcessIdentity actor_process = 5;
+
+  // File attributes (Windows: FILE_ATTRIBUTE_HIDDEN, etc.).
+  uint32 attributes = 6;
+
+  // Whether this is in a sensitive path (System32, /etc, startup dirs).
+  bool is_sensitive_path = 7;
+}
+
+message FileHashes {
+  string sha256 = 1;
+  string sha1 = 2;   // For VirusTotal compatibility
+  string md5 = 3;    // For legacy IOC matching
+  string imphash = 4; // Import hash (PE files only)
+}
+
+message NetworkEvent {
+  // Connection endpoints.
+  string source_ip = 1;
+  uint32 source_port = 2;
+  string dest_ip = 3;
+  uint32 dest_port = 4;
+
+  // Protocol details.
+  NetworkProtocol protocol = 5;
+  string state = 6;  // "established" | "syn_sent" | "close_wait" | etc.
+
+  // Traffic volume (for exfiltration detection).
+  uint64 bytes_sent = 7;
+  uint64 bytes_recv = 8;
+
+  // Process owning this connection.
+  ProcessIdentity owner_process = 9;
+
+  // GeoIP enrichment (populated by enrichment service, not agent).
+  GeoInfo dest_geo = 10;
+
+  // Community ID flow hash (for cross-device correlation).
+  // https://github.com/corelight/community-id-spec
+  string community_id = 11;
+}
+
+enum NetworkProtocol {
+  PROTOCOL_UNKNOWN = 0;
+  PROTOCOL_TCP = 1;
+  PROTOCOL_UDP = 2;
+  PROTOCOL_ICMP = 3;
+  PROTOCOL_SCTP = 4;
+}
+
+message GeoInfo {
+  string country_code = 1;  // "US"
+  string country_name = 2;  // "United States"
+  string city = 3;
+  string asn = 4;           // "AS13335"
+  string org = 5;           // "Cloudflare, Inc."
+  double latitude = 6;
+  double longitude = 7;
+}
+
+message DnsEvent {
+  // Query details.
+  string query_name = 1;    // "malware.evil.com"
+  string query_type = 2;    // "A" | "AAAA" | "CNAME" | "TXT" | "MX"
+
+  // Response details (empty if query failed or was blocked).
+  repeated string answers = 3;  // ["93.184.216.34"]
+  uint32 rcode = 4;             // DNS response code (0=NOERROR, 3=NXDOMAIN)
+  uint32 ttl = 5;
+
+  // Process that initiated the DNS query.
+  ProcessIdentity querying_process = 6;
+
+  // Whether this was a DNS-over-HTTPS or DNS-over-TLS query.
+  bool encrypted = 7;
+
+  // Response time in microseconds (for C2 beaconing detection via timing analysis).
+  uint32 response_time_us = 8;
+}
+
+message AuthEvent {
+  // Authentication details.
+  string auth_type = 1;    // "interactive" | "network" | "service" | "remote_interactive" | "cached"
+  string auth_method = 2;  // "password" | "kerberos" | "ntlm" | "certificate" | "ssh_key"
+  bool success = 3;
+
+  // User attempting authentication.
+  string username = 4;
+  string domain = 5;        // Windows domain or Linux realm
+  string user_sid = 6;      // SID of the authenticating user
+
+  // Source of the authentication attempt.
+  string source_ip = 7;
+  uint32 source_port = 8;
+  string source_hostname = 9;
+
+  // Target (for network logons).
+  string target_hostname = 10;
+  string target_service = 11;  // "cifs" | "http" | "ldap" | "ssh"
+
+  // Windows-specific.
+  uint32 logon_type = 12;     // Windows logon type (2=Interactive, 3=Network, etc.)
+  string logon_id = 13;       // LUID for session correlation
+  string failure_reason = 14; // "bad_password" | "account_locked" | "expired"
+
+  // Elevation.
+  bool elevated = 15;          // Was this a privilege escalation?
+  IntegrityLevel new_integrity = 16;
+}
+
+message RegistryEvent {
+  // Registry key and value details.
+  string hive = 1;        // "HKLM" | "HKCU" | "HKU" | "HKCR"
+  string key_path = 2;    // "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+  string value_name = 3;  // "Startup_App"
+  string value_data = 4;  // The actual value data (truncated at 4KB)
+  uint32 value_type = 5;  // REG_SZ=1, REG_DWORD=4, REG_BINARY=3, etc.
+
+  // Previous value (for modify events — enables diff detection).
+  string old_value_data = 6;
+
+  // Process that performed the registry operation.
+  ProcessIdentity actor_process = 7;
+
+  // Whether this is a persistence-related key.
+  bool is_persistence_key = 8;
+}
+
+message ModuleLoadEvent {
+  // DLL/SO that was loaded.
+  string module_path = 1;
+  FileHashes module_hashes = 2;
+
+  // Process that loaded the module.
+  ProcessIdentity loading_process = 3;
+
+  // Whether the module is signed (and by whom).
+  string signer = 4;        // "" if unsigned
+  bool is_signed = 5;
+  bool signature_valid = 6;
+
+  // Base address and size (for memory forensics).
+  uint64 base_address = 7;
+  uint64 image_size = 8;
+}
+
+message SystemEvent {
+  // Metric type.
+  string metric_type = 1;  // "cpu" | "memory" | "disk" | "uptime" | "os_info"
+
+  // Key-value metrics.
+  // Using string values to avoid type ambiguity in protobuf.
+  // Storage service parses these into typed ES fields.
+  map<string, string> metrics = 2;
+}
+
+message TamperEvent {
+  // Type of tamper detected.
+  TamperType tamper_type = 1;
+
+  // Human-readable description.
+  string description = 2;
+
+  // Process that attempted the tamper (if identifiable).
+  ProcessIdentity suspect_process = 3;
+
+  // Additional context.
+  map<string, string> context = 4;
+}
+
+enum TamperType {
+  TAMPER_UNKNOWN = 0;
+  TAMPER_ETW_SESSION_STOPPED = 1;
+  TAMPER_EBPF_PROGRAM_DETACHED = 2;
+  TAMPER_AGENT_PROCESS_INJECTED = 3;
+  TAMPER_AGENT_BINARY_MODIFIED = 4;
+  TAMPER_CANARY_EVENT_MISSING = 5;
+  TAMPER_SERVICE_CONFIGURATION_CHANGED = 6;
+  TAMPER_CERTIFICATE_TAMPERED = 7;
+  TAMPER_EVENT_FLOOD_DETECTED = 8;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BATCHING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Events are batched for efficient transmission.
+// Max batch size: 100 events or 1MB protobuf, whichever comes first.
+// Max batch delay: 5 seconds.
+message TelemetryBatch {
+  // Batch metadata.
+  string batch_id = 1;       // UUIDv7
+  string agent_id = 2;       // Same as host_guid
+  uint32 sequence_number = 3; // Monotonically increasing per agent (for gap detection)
+
+  // Host identity (full details sent every 60s, or on change).
+  // If empty, backend uses cached identity for this agent_id.
+  HostIdentity host_identity = 4;
+
+  // Events in this batch.
+  repeated TelemetryEvent events = 5;
+
+  // Batch-level metadata.
+  google.protobuf.Timestamp sent_at = 6;
+
+  // Agent health metrics (piggyback on telemetry batches).
+  AgentMetrics agent_metrics = 7;
+
+  // Number of events dropped since last batch (due to backpressure).
+  uint64 events_dropped = 8;
+
+  // Compression algorithm used on the events field (if any).
+  Compression compression = 9;
+}
+
+message AgentMetrics {
+  float cpu_percent = 1;
+  uint64 memory_bytes = 2;
+  uint64 disk_buffer_bytes = 3;
+  uint32 events_per_second = 4;
+  uint32 active_providers = 5;
+  uint32 rules_loaded = 6;
+  uint32 alerts_generated = 7;
+  bool backpressure_active = 8;
+}
+
+enum Compression {
+  COMPRESSION_NONE = 0;
+  COMPRESSION_ZSTD = 1;
+  COMPRESSION_LZ4 = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACKNOWLEDGMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+message TelemetryAck {
+  string batch_id = 1;
+  bool accepted = 2;
+  string error_message = 3;
+
+  // Backpressure signal: if > 0, agent should reduce send rate.
+  // Value is recommended delay in milliseconds before next batch.
+  uint32 backoff_ms = 4;
+
+  // Policy update (piggyback on ack to avoid separate round-trip).
+  AgentPolicy policy_update = 5;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS (Agent → Backend)
+// ═══════════════════════════════════════════════════════════════════════════
+
+message LocalAlert {
+  string alert_id = 1;          // UUIDv7
+  string rule_id = 2;
+  string rule_name = 3;
+  Severity severity = 4;
+  repeated string mitre_techniques = 5;
+
+  // The event(s) that triggered this alert.
+  repeated TelemetryEvent triggering_events = 6;
+
+  // Correlation context (if multi-event detection).
+  string correlation_id = 7;   // Groups related alerts
+
+  // Risk score (0-100).
+  uint32 risk_score = 8;
+
+  // Recommended response action.
+  ResponseAction recommended_action = 9;
+
+  // Detection context (rule description, matched patterns, etc.).
+  map<string, string> context = 10;
+
+  google.protobuf.Timestamp detected_at = 11;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_LOW = 2;
+  SEVERITY_MEDIUM = 3;
+  SEVERITY_HIGH = 4;
+  SEVERITY_CRITICAL = 5;
+}
+
+enum ResponseAction {
+  ACTION_NONE = 0;
+  ACTION_LOG_ONLY = 1;
+  ACTION_ALERT = 2;
+  ACTION_ISOLATE_PROCESS = 3;
+  ACTION_ISOLATE_HOST = 4;
+  ACTION_COLLECT_ARTIFACT = 5;
+  ACTION_KILL_PROCESS = 6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMMANDS (Backend → Agent)
+// ═══════════════════════════════════════════════════════════════════════════
+
+message AgentCommand {
+  string command_id = 1;        // UUIDv7
+  CommandType type = 2;
+  map<string, string> parameters = 3;
+  google.protobuf.Timestamp issued_at = 4;
+  google.protobuf.Timestamp expires_at = 5; // Command expires if not executed
+  Severity urgency = 6;        // Higher urgency = execute sooner
+}
+
+enum CommandType {
+  COMMAND_UNSPECIFIED = 0;
+  COMMAND_UPDATE_POLICY = 1;
+  COMMAND_COLLECT_ARTIFACT = 2;
+  COMMAND_ISOLATE_HOST = 3;
+  COMMAND_UNISOLATE_HOST = 4;
+  COMMAND_KILL_PROCESS = 5;
+  COMMAND_SCAN_FILE = 6;
+  COMMAND_UPDATE_RULES = 7;
+  COMMAND_UPDATE_IOCS = 8;
+  COMMAND_RESTART_AGENT = 9;
+  COMMAND_UPDATE_AGENT = 10;
+  COMMAND_COLLECT_MEMORY_DUMP = 11;
+  COMMAND_EXECUTE_RESPONSE_SCRIPT = 12;
+  COMMAND_ROTATE_CERTIFICATE = 13;
+}
+
+message CommandResult {
+  string command_id = 1;
+  bool success = 2;
+  string output = 3;       // Truncated at 64KB
+  int32 exit_code = 4;
+  map<string, string> data = 5;
+  google.protobuf.Timestamp completed_at = 6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POLICY
+// ═══════════════════════════════════════════════════════════════════════════
+
+message AgentPolicy {
+  // Version for optimistic concurrency (agent applies only if newer).
+  uint64 version = 1;
+
+  // Collection settings.
+  CollectorPolicy collectors = 2;
+
+  // Detection rules (Sigma YAML, serialized).
+  repeated DetectionRuleSpec rules = 3;
+
+  // File paths to monitor.
+  repeated string watch_paths = 4;
+
+  // IOC blocklists (hashes, domains, IPs).
+  IocPolicy iocs = 5;
+
+  // Event filtering (noise reduction).
+  FilterPolicy filters = 6;
+
+  // Batch and transport settings.
+  uint32 heartbeat_interval_secs = 7;
+  uint32 max_batch_size = 8;
+  uint32 max_batch_delay_secs = 9;
+  uint32 max_disk_buffer_mb = 10;
+}
+
+message CollectorPolicy {
+  bool enable_process = 1;
+  bool enable_filesystem = 2;
+  bool enable_network = 3;
+  bool enable_dns = 4;
+  bool enable_auth = 5;
+  bool enable_registry = 6;
+  bool enable_module_load = 7;
+  bool enable_system_metrics = 8;
+
+  // Per-collector rate limits (events/sec, 0 = unlimited).
+  uint32 process_rate_limit = 10;
+  uint32 filesystem_rate_limit = 11;
+  uint32 network_rate_limit = 12;
+}
+
+message DetectionRuleSpec {
+  string rule_id = 1;
+  string rule_name = 2;
+  string rule_format = 3;   // "sigma" | "yara" | "heuristic"
+  bytes rule_content = 4;   // Sigma YAML bytes, YARA rule bytes, or JSON heuristic
+  Severity severity = 5;
+  repeated string mitre_techniques = 6;
+  bool enabled = 7;
+}
+
+message IocPolicy {
+  // SHA256 hashes of known-bad files.
+  repeated string bad_file_hashes = 1;
+  // Known-bad domains (for DNS matching).
+  repeated string bad_domains = 2;
+  // Known-bad IP addresses (for network matching).
+  repeated string bad_ips = 3;
+  // Known-bad process names.
+  repeated string bad_process_names = 4;
+  // Timestamp for cache invalidation.
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message FilterPolicy {
+  // Process names to suppress (e.g., "svchost.exe" for known-good system procs).
+  repeated string suppress_process_names = 1;
+  // File path prefixes to suppress (e.g., "C:\Windows\Temp\iislog").
+  repeated string suppress_file_paths = 2;
+  // Destination IPs to suppress (e.g., internal DNS servers).
+  repeated string suppress_dest_ips = 3;
+  // Maximum events per second per category before rate limiting kicks in.
+  uint32 max_events_per_sec_per_category = 4;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENROLLMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+message EnrollmentRequest {
+  // One-time enrollment token (JWT, issued by admin).
+  string enrollment_token = 1;
+
+  // PKCS#10 Certificate Signing Request (DER-encoded).
+  bytes csr = 2;
+
+  // Host fingerprint for duplicate detection.
+  string machine_id = 3;
+  string hostname = 4;
+  string os_type = 5;
+  string os_version = 6;
+  string architecture = 7;
+  string agent_version = 8;
+}
+
+message EnrollmentResponse {
+  // Signed agent certificate (PEM-encoded).
+  string agent_certificate = 1;
+  // CA certificate chain (PEM-encoded).
+  string ca_chain = 2;
+  // Assigned agent GUID (same as host_guid going forward).
+  string agent_guid = 3;
+  // Initial policy.
+  AgentPolicy initial_policy = 4;
+  // Ingestion gateway endpoints (for failover).
+  repeated string gateway_endpoints = 5;
+}
+
+message CertificateRenewalRequest {
+  // Current agent GUID.
+  string agent_guid = 1;
+  // New CSR (DER-encoded).
+  bytes csr = 2;
+  // Signed with current (soon-to-expire) certificate — server validates.
+}
+
+message CertificateRenewalResponse {
+  string agent_certificate = 1;
+  string ca_chain = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// gRPC SERVICE DEFINITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+service IngestionService {
+  // Bidirectional streaming: agent sends batches, server sends acks.
+  // This is the primary telemetry channel.
+  rpc StreamTelemetry(stream TelemetryBatch) returns (stream TelemetryAck);
+
+  // Unary fallback for environments where streaming is blocked.
+  rpc SendTelemetry(TelemetryBatch) returns (TelemetryAck);
+
+  // Alert reporting (separate from telemetry for priority handling).
+  rpc ReportAlert(LocalAlert) returns (TelemetryAck);
+}
+
+service CommandService {
+  // Server-streaming: agent opens channel, backend pushes commands.
+  rpc CommandChannel(CommandChannelRequest) returns (stream AgentCommand);
+
+  // Agent reports command execution result.
+  rpc ReportCommandResult(CommandResult) returns (CommandResultAck);
+}
+
+message CommandChannelRequest {
+  string agent_guid = 1;
+}
+
+message CommandResultAck {
+  string command_id = 1;
+  bool received = 2;
+}
+
+service EnrollmentService {
+  // First-time agent enrollment.
+  rpc Enroll(EnrollmentRequest) returns (EnrollmentResponse);
+
+  // Certificate rotation.
+  rpc RenewCertificate(CertificateRenewalRequest) returns (CertificateRenewalResponse);
+}

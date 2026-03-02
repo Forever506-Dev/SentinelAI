@@ -1,0 +1,148 @@
+{
+  "index_patterns": ["sentinel-telemetry-*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index.number_of_shards": 2,
+      "index.number_of_replicas": 1,
+      "index.refresh_interval": "30s",
+      "index.mapping.total_fields.limit": 200,
+      "index.mapping.depth.limit": 3,
+      "index.mapping.nested_objects.limit": 10,
+      "index.codec": "best_compression",
+      "index.lifecycle.name": "sentinel-telemetry-ilm",
+      "index.lifecycle.rollover_alias": "sentinel-telemetry",
+      "index.routing.allocation.require.data": "hot",
+      "index.sort.field": ["@timestamp"],
+      "index.sort.order": ["desc"]
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "_source": { "enabled": true },
+      "properties": {
+        "event_id":               { "type": "keyword" },
+        "category":               { "type": "keyword" },
+        "action":                 { "type": "keyword" },
+        "event_source":           { "type": "keyword" },
+
+        "host_guid":              { "type": "keyword" },
+        "hostname":               { "type": "keyword" },
+        "tenant_id":              { "type": "keyword" },
+        "os_type":                { "type": "keyword" },
+        "agent_version":          { "type": "keyword" },
+
+        "process_guid":           { "type": "keyword" },
+        "parent_process_guid":    { "type": "keyword" },
+        "pid":                    { "type": "integer" },
+        "ppid":                   { "type": "integer" },
+        "session_id":             { "type": "integer" },
+
+        "process_name": {
+          "type": "keyword",
+          "fields": {
+            "text": { "type": "text", "analyzer": "simple" }
+          }
+        },
+        "exe_path": {
+          "type": "text",
+          "fields": {
+            "keyword": { "type": "keyword", "ignore_above": 512 }
+          }
+        },
+        "command_line": {
+          "type": "text",
+          "analyzer": "standard",
+          "fields": {
+            "keyword": { "type": "keyword", "ignore_above": 2048 }
+          }
+        },
+        "working_directory":      { "type": "keyword", "ignore_above": 512 },
+
+        "sha256":                 { "type": "keyword" },
+        "sha1":                   { "type": "keyword" },
+        "md5":                    { "type": "keyword" },
+        "imphash":                { "type": "keyword" },
+
+        "user_id":                { "type": "keyword" },
+        "username":               { "type": "keyword" },
+        "domain":                 { "type": "keyword" },
+        "integrity_level":        { "type": "keyword" },
+
+        "file_path": {
+          "type": "text",
+          "fields": {
+            "keyword": { "type": "keyword", "ignore_above": 512 }
+          }
+        },
+        "file_old_path":          { "type": "keyword", "ignore_above": 512 },
+        "file_size":              { "type": "long" },
+        "file_attributes":        { "type": "integer" },
+        "is_sensitive_path":      { "type": "boolean" },
+
+        "source_ip":              { "type": "ip" },
+        "source_port":            { "type": "integer" },
+        "dest_ip":                { "type": "ip" },
+        "dest_port":              { "type": "integer" },
+        "protocol":               { "type": "keyword" },
+        "network_state":          { "type": "keyword" },
+        "bytes_sent":             { "type": "long" },
+        "bytes_recv":             { "type": "long" },
+        "community_id":           { "type": "keyword" },
+
+        "dns_query_name":         { "type": "keyword" },
+        "dns_query_type":         { "type": "keyword" },
+        "dns_answers":            { "type": "keyword" },
+        "dns_rcode":              { "type": "integer" },
+        "dns_response_time_us":   { "type": "integer" },
+
+        "auth_type":              { "type": "keyword" },
+        "auth_method":            { "type": "keyword" },
+        "auth_success":           { "type": "boolean" },
+        "logon_type":             { "type": "integer" },
+        "failure_reason":         { "type": "keyword" },
+
+        "registry_hive":          { "type": "keyword" },
+        "registry_key_path":      { "type": "keyword", "ignore_above": 512 },
+        "registry_value_name":    { "type": "keyword" },
+        "registry_value_type":    { "type": "integer" },
+        "is_persistence_key":     { "type": "boolean" },
+
+        "module_path":            { "type": "keyword", "ignore_above": 512 },
+        "module_signer":          { "type": "keyword" },
+        "module_is_signed":       { "type": "boolean" },
+
+        "dest_country_code":      { "type": "keyword" },
+        "dest_country_name":      { "type": "keyword" },
+        "dest_city":              { "type": "keyword" },
+        "dest_asn":               { "type": "keyword" },
+        "dest_org":               { "type": "keyword" },
+        "dest_location":          { "type": "geo_point" },
+
+        "risk_score":             { "type": "short" },
+        "mitre_techniques":       { "type": "keyword" },
+        "tags":                   { "type": "keyword" },
+
+        "tamper_type":            { "type": "keyword" },
+
+        "@timestamp":             { "type": "date" },
+        "monotonic_ns":           { "type": "long" },
+        "processed_at":           { "type": "date" },
+        "received_at":            { "type": "date" },
+
+        "memory_bytes":           { "type": "long" },
+        "cpu_percent":            { "type": "float" },
+        "thread_count":           { "type": "integer" },
+        "handle_count":           { "type": "integer" },
+        "creation_flags":         { "type": "integer" },
+        "exit_code":              { "type": "integer" }
+      }
+    },
+    "aliases": {
+      "sentinel-telemetry": {}
+    }
+  },
+  "_meta": {
+    "description": "SentinelAI normalized telemetry events — strict mapping to prevent mapping explosion",
+    "version": "2.0.0"
+  }
+}

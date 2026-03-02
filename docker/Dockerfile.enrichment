@@ -1,0 +1,37 @@
+# ============================================================
+# SentinelAI Enrichment Service — Dockerfile (Python)
+# ============================================================
+# Subscribes to NATS, enriches events with GeoIP, MITRE ATT&CK,
+# threat intelligence, and process tree reconstruction.
+# ============================================================
+
+FROM python:3.11-slim
+
+LABEL maintainer="SentinelAI Team"
+LABEL description="SentinelAI Enrichment Service (GeoIP, MITRE, ThreatIntel)"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r sentinel && useradd -r -g sentinel -d /app -s /bin/false sentinel
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt* main.py ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi \
+    && pip install --no-cache-dir nats-py httpx redis geoip2 structlog
+
+COPY . .
+
+# Mount point for GeoIP database
+VOLUME ["/app/data/geoip"]
+
+RUN chown -R sentinel:sentinel /app
+
+USER sentinel
+
+# No external port — subscribes to NATS
+CMD ["python", "main.py"]
