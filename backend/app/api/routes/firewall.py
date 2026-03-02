@@ -1,13 +1,15 @@
 """
-Firewall Routes (Phase 1)
+Firewall Routes (Phase 2)
 
 Full CRUD for firewall rules with RBAC, HMAC-signed commands,
-approval workflow for destructive actions, drift detection, and policies.
+approval workflow for destructive actions, drift detection, policies,
+and advanced filtering/search.
 """
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, or_, cast, String
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -81,23 +83,83 @@ async def list_tracked_rules(
     agent_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    search: str = Query("", description="Partial name match (case-insensitive)"),
+    direction: str = Query("", description="Filter: inbound | outbound"),
+    action: str = Query("", description="Filter: allow | block"),
+    enabled: str = Query("", description="Filter: true | false"),
+    profile: str = Query("", description="Filter: domain | private | public"),
+    sort_by: str = Query("created_at", description="Sort field: name | direction | action | created_at | updated_at"),
+    sort_dir: str = Query("desc", description="Sort direction: asc | desc"),
     current_user: dict = Depends(require_role("viewer")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """List tracked firewall rules for an agent from the database."""
-    query = (
-        select(FirewallRule)
-        .where(FirewallRule.agent_id == agent_id)
-        .order_by(desc(FirewallRule.created_at))
-    )
+    """List tracked firewall rules for an agent with advanced filtering.
+
+    Supports:
+      - **search**: partial name match via trigram index (ILIKE)
+      - **direction**: exact match on inbound/outbound
+      - **action**: exact match on allow/block
+      - **enabled**: filter by enabled state
+      - **profile**: filter rules containing a specific profile in the profiles array
+      - **sort_by** + **sort_dir**: flexible sorting
+      - **pagination**: page + page_size
+    """
+    query = select(FirewallRule).where(FirewallRule.agent_id == agent_id)
+    filters_applied: dict[str, str] = {}
+
+    # ── Search (ILIKE for partial name match) ──
+    if search.strip():
+        query = query.where(FirewallRule.name.ilike(f"%{search.strip()}%"))
+        filters_applied["search"] = search.strip()
+
+    # ── Direction filter ──
+    if direction and direction.lower() in ("inbound", "outbound"):
+        query = query.where(FirewallRule.direction == direction.lower())
+        filters_applied["direction"] = direction.lower()
+
+    # ── Action filter ──
+    if action and action.lower() in ("allow", "block"):
+        query = query.where(FirewallRule.action == action.lower())
+        filters_applied["action"] = action.lower()
+
+    # ── Enabled filter ──
+    if enabled.lower() in ("true", "false"):
+        val = enabled.lower() == "true"
+        query = query.where(FirewallRule.enabled == val)
+        filters_applied["enabled"] = str(val).lower()
+
+    # ── Profile filter (uses @> "contains" operator on the profiles ARRAY) ──
+    if profile and profile.lower() in ("domain", "private", "public"):
+        query = query.where(
+            FirewallRule.profiles.any(profile.lower())
+        )
+        filters_applied["profile"] = profile.lower()
+
+    # ── Sorting ──
+    allowed_sorts = {"name", "direction", "action", "created_at", "updated_at", "enabled", "protocol"}
+    sort_field = sort_by if sort_by in allowed_sorts else "created_at"
+    sort_col = getattr(FirewallRule, sort_field)
+    if sort_dir.lower() == "asc":
+        query = query.order_by(sort_col.asc())
+    else:
+        query = query.order_by(sort_col.desc())
+
+    # ── Count total (before pagination) ──
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
+    # ── Pagination ──
     query = query.offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     rules = result.scalars().all()
 
-    return {"rules": rules, "total": total, "page": page, "page_size": page_size}
+    return {
+        "rules": rules,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "filters_applied": filters_applied,
+    }
 
 
 @router.post("/{agent_id}/rules")
@@ -127,6 +189,7 @@ async def add_firewall_rule(
         "protocol": req.protocol,
         "port": req.local_port,
         "remote_address": req.remote_address,
+        "profiles": req.profiles or [],
     }
 
     cmd_result = await relay_signed_command(agent_id, "firewall_add", params)
@@ -211,7 +274,8 @@ async def edit_firewall_rule(
 
     # Admin/superadmin: apply immediately
     params = {"name": rule.name, "direction": rule.direction, "action": rule.action,
-              "protocol": rule.protocol, "port": rule.local_port, "remote_address": rule.remote_address}
+              "protocol": rule.protocol, "port": rule.local_port, "remote_address": rule.remote_address,
+              "profiles": rule.profiles or []}
     cmd_result = await relay_signed_command(agent_id, "firewall_edit", params)
     await create_revision(db, rule, diff, current_user.get("sub"), req.reason)
     action = await record_remediation(

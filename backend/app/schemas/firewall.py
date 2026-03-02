@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 
 # ── Rule Schemas ────────────────────────────────────────────
 
+VALID_PROFILES = {"domain", "private", "public"}
+
+
 class FirewallRuleBase(BaseModel):
     """Base schema for firewall rule fields."""
     name: str = Field(..., max_length=255)
@@ -21,6 +24,10 @@ class FirewallRuleBase(BaseModel):
     remote_address: str = Field("any", max_length=255)
     enabled: bool = True
     profile: str = Field("any", max_length=50)
+    profiles: list[str] = Field(
+        default_factory=list,
+        description="Firewall profiles: domain, private, public. Empty = all.",
+    )
 
 
 class FirewallRuleCreate(FirewallRuleBase):
@@ -40,6 +47,7 @@ class FirewallRuleUpdate(BaseModel):
     remote_address: str | None = Field(None, max_length=255)
     enabled: bool | None = None
     profile: str | None = Field(None, max_length=50)
+    profiles: list[str] | None = None
     reason: str = Field("", max_length=1000)
 
 
@@ -47,6 +55,7 @@ class FirewallRuleResponse(FirewallRuleBase):
     """Full firewall rule details."""
     id: uuid.UUID
     agent_id: uuid.UUID
+    profiles: list[str] = []
     policy_id: uuid.UUID | None = None
     synced_at: datetime | None = None
     drift_detected: bool = False
@@ -59,11 +68,12 @@ class FirewallRuleResponse(FirewallRuleBase):
 
 
 class FirewallRuleListResponse(BaseModel):
-    """Paginated list of firewall rules."""
+    """Paginated list of firewall rules with filter summary."""
     rules: list[FirewallRuleResponse]
     total: int
     page: int
     page_size: int
+    filters_applied: dict = {}
 
 
 class FirewallRuleToggleRequest(BaseModel):

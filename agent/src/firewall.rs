@@ -433,15 +433,27 @@ pub fn add_rule(command_id: &str, params: &serde_json::Value) -> CommandResult {
     info!(name = %name, direction = %direction, action = %action, protocol = %protocol,
           port = %port, remote_addr = %remote_addr, "Adding firewall rule");
 
+    // Profiles: comma-separated string or JSON array
+    let profiles_str: Option<String> = params.get("profiles").and_then(|v| {
+        if let Some(s) = v.as_str() {
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        } else if let Some(arr) = v.as_array() {
+            let items: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+            if items.is_empty() { None } else { Some(items.join(",")) }
+        } else {
+            None
+        }
+    });
+
     if cfg!(windows) {
-        add_rule_windows(command_id, name, direction, action, protocol, port, remote_addr)
+        add_rule_windows(command_id, name, direction, action, protocol, port, remote_addr, profiles_str.as_deref())
     } else {
         add_rule_linux(command_id, direction, action, protocol, port, remote_addr)
     }
 }
 
 fn add_rule_windows(command_id: &str, name: &str, direction: &str, action: &str,
-                     protocol: &str, port: &str, remote_addr: &str) -> CommandResult {
+                     protocol: &str, port: &str, remote_addr: &str, profiles: Option<&str>) -> CommandResult {
     let dir = if direction == "inbound" { "in" } else { "out" };
     let act = if action == "block" { "block" } else { "allow" };
 
@@ -455,6 +467,12 @@ fn add_rule_windows(command_id: &str, name: &str, direction: &str, action: &str,
     }
     if !remote_addr.is_empty() {
         cmd_str.push_str(&format!(" remoteip={}", remote_addr));
+    }
+    // Profiles: comma-separated list of domain,private,public
+    if let Some(p) = profiles {
+        if !p.is_empty() {
+            cmd_str.push_str(&format!(" profile={}", p));
+        }
     }
     cmd_str.push_str(" enable=yes");
 
@@ -728,6 +746,17 @@ fn edit_rule_windows(command_id: &str, name: &str, params: &serde_json::Value) -
     let new_protocol  = params.get("protocol").and_then(|v| v.as_str());
     let new_port      = params.get("port").and_then(|v| v.as_str());
     let new_remote    = params.get("remote_address").and_then(|v| v.as_str());
+    // Profiles: either a comma-separated string or a JSON array of strings
+    let new_profiles: Option<String> = params.get("profiles").and_then(|v| {
+        if let Some(s) = v.as_str() {
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        } else if let Some(arr) = v.as_array() {
+            let items: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+            if items.is_empty() { None } else { Some(items.join(",")) }
+        } else {
+            None
+        }
+    });
 
     // Resolve which actual name exists in Windows Firewall
     let actual_name = resolve_rule_name_windows(name);
@@ -773,6 +802,10 @@ fn edit_rule_windows(command_id: &str, name: &str, params: &serde_json::Value) -
             new_parts.push(format!("remoteip={}", ra));
         }
     }
+    // Profiles: comma-separated list (domain,private,public)
+    if let Some(ref prof) = new_profiles {
+        new_parts.push(format!("profile={}", prof));
+    }
 
     // If direction changes, we must delete and re-add since dir is a selector, not settable
     if let Some(dir) = new_direction {
@@ -815,6 +848,9 @@ fn edit_rule_windows(command_id: &str, name: &str, params: &serde_json::Value) -
                 if !ra.is_empty() && !ra.eq_ignore_ascii_case("any") {
                     cmd_str.push_str(&format!(" remoteip={}", ra));
                 }
+            }
+            if let Some(ref prof) = new_profiles {
+                cmd_str.push_str(&format!(" profile={}", prof));
             }
             cmd_str.push_str(" enable=yes");
 
