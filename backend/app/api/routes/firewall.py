@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func, desc, or_, cast, String
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database import get_db
 from app.core.security import require_role, sign_command
@@ -250,6 +251,11 @@ async def edit_firewall_rule(
 
     if not diff:
         return {"status": "no_changes", "output": "No fields changed"}
+
+    # Ensure SQLAlchemy detects mutable field changes (ARRAY columns)
+    if "profiles" in diff:
+        flag_modified(rule, "profiles")
+    await db.flush()
 
     user_role = current_user.get("role", "analyst")
 

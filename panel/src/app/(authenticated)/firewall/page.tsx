@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   ShieldCheck, Flame, Plus, Trash2, Loader2, RefreshCw,
   Ban, Network, ArrowDownCircle, ArrowUpCircle, Monitor,
@@ -84,7 +84,6 @@ export default function FirewallPage() {
   const [filterProfile, setFilterProfile] = useState("");
   const [trackedPage, setTrackedPage] = useState(1);
   const trackedPageSize = 50;
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Add rule form
   const [showAddForm, setShowAddForm] = useState(false);
@@ -128,21 +127,17 @@ export default function FirewallPage() {
   // Status messages
   const [statusMsg, setStatusMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  /* ── Debounced search for tracked rules ── */
-  const debouncedFilterLoad = useCallback(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      setTrackedPage(1);
-      loadTrackedRules();
-    }, 350);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  /* ── Debounced filter reload for tracked rules (ref avoids stale closure) ── */
+  const loadTrackedRef = useRef<((page?: number) => Promise<void>) | undefined>(undefined);
 
   useEffect(() => {
-    if (activeTab === "tracked" && selectedAgent) {
-      debouncedFilterLoad();
-    }
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [filterSearch, filterDirection, filterAction, filterEnabled, filterProfile]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (activeTab !== "tracked" || !selectedAgent) return;
+    const timer = setTimeout(() => {
+      setTrackedPage(1);
+      loadTrackedRef.current?.(1);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [filterSearch, filterDirection, filterAction, filterEnabled, filterProfile, activeTab, selectedAgent]);
 
   const hasActiveFilters = filterSearch || filterDirection || filterAction || filterEnabled || filterProfile;
 
@@ -231,6 +226,9 @@ export default function FirewallPage() {
       setTrackedLoading(false);
     }
   };
+
+  // Keep ref in sync so debounced effect always calls the latest version
+  useEffect(() => { loadTrackedRef.current = loadTrackedRules; });
 
   const loadApprovals = async () => {
     setApprovalsLoading(true);
@@ -341,15 +339,19 @@ export default function FirewallPage() {
           port: editPort || undefined,
           remote_address: editRemoteAddr || undefined,
           direction: editDirection,
-          profiles: editProfiles.length ? editProfiles : undefined,
+          profiles: editProfiles,
           reason: editReason || undefined,
         });
-        if (res.approval_required) {
+        if (res.status === "pending_approval") {
           setStatusMsg({ type: "success", text: `Edit requires approval. Approval ID: ${res.approval_id}` });
-        } else {
+        } else if (res.status === "completed" || res.status === "applied") {
           setStatusMsg({ type: "success", text: `Rule "${editingRule.name}" updated successfully.` });
+        } else if (res.status === "no_changes") {
+          setStatusMsg({ type: "success", text: "No fields changed." });
+        } else {
+          setStatusMsg({ type: "error", text: res.output || `Update returned status: ${res.status}` });
         }
-        loadTrackedRules();
+        await loadTrackedRules();
       } else {
         // For live (untracked) rules: use the edit endpoint (in-place netsh set rule)
         const res = await api.editFirewallRule(selectedAgent, {

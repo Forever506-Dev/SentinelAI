@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 # ── Rule Schemas ────────────────────────────────────────────
@@ -29,6 +29,14 @@ class FirewallRuleBase(BaseModel):
         description="Firewall profiles: domain, private, public. Empty = all.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_port_field(cls, data: dict) -> dict:
+        """Accept 'port' as alias for 'local_port' (frontend compatibility)."""
+        if isinstance(data, dict) and "port" in data and "local_port" not in data:
+            data["local_port"] = data.pop("port")
+        return data
+
 
 class FirewallRuleCreate(FirewallRuleBase):
     """Create a new firewall rule."""
@@ -50,6 +58,14 @@ class FirewallRuleUpdate(BaseModel):
     profiles: list[str] | None = None
     reason: str = Field("", max_length=1000)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_port_field(cls, data: dict) -> dict:
+        """Accept 'port' as alias for 'local_port' (frontend compatibility)."""
+        if isinstance(data, dict) and "port" in data and "local_port" not in data:
+            data["local_port"] = data.pop("port")
+        return data
+
 
 class FirewallRuleResponse(FirewallRuleBase):
     """Full firewall rule details."""
@@ -65,6 +81,12 @@ class FirewallRuleResponse(FirewallRuleBase):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @computed_field
+    @property
+    def port(self) -> str | None:
+        """Alias for local_port (frontend compatibility)."""
+        return self.local_port
 
 
 class FirewallRuleListResponse(BaseModel):
