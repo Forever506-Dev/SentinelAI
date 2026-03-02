@@ -1,0 +1,279 @@
+syntax = "proto3";
+
+package sentinel;
+
+import "google/protobuf/timestamp.proto";
+
+// ═══════════════════════════════════════════════════════════════════
+// Agent ↔ Backend Communication Protocol
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── Registration ───────────────────────────────────────────────
+
+message AgentRegistrationRequest {
+  string hostname       = 1;
+  string os_type        = 2;
+  string os_version     = 3;
+  string architecture   = 4;
+  string agent_version  = 5;
+  map<string, string> metadata = 6;
+}
+
+message AgentRegistrationResponse {
+  string agent_id    = 1;
+  string auth_token  = 2;
+  AgentPolicy policy = 3;
+  string hmac_key    = 4;  // HMAC-SHA256 key for command signing
+}
+
+// ─── Heartbeat ──────────────────────────────────────────────────
+
+message HeartbeatRequest {
+  string agent_id       = 1;
+  string status         = 2;
+  float  cpu_usage      = 3;
+  double memory_usage   = 4;
+  double disk_usage     = 5;
+  uint64 uptime         = 6;
+  string agent_version  = 7;
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+message HeartbeatResponse {
+  string status = 1;
+  repeated AgentCommand commands = 2;
+}
+
+// ─── Telemetry ──────────────────────────────────────────────────
+
+message TelemetryBatch {
+  string agent_id  = 1;
+  string batch_id  = 2;
+  repeated TelemetryEvent events = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message TelemetryEvent {
+  string id          = 1;
+  EventType type     = 2;
+  string action      = 3;
+  google.protobuf.Timestamp event_time = 4;
+
+  oneof payload {
+    ProcessEvent  process_event  = 10;
+    FileEvent     file_event     = 11;
+    NetworkEvent  network_event  = 12;
+    AuthEvent     auth_event     = 13;
+    RegistryEvent registry_event = 14;
+    SystemEvent   system_event   = 15;
+  }
+}
+
+message TelemetryAck {
+  string batch_id      = 1;
+  bool   accepted      = 2;
+  string error_message = 3;
+}
+
+// ─── Event Types ────────────────────────────────────────────────
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  PROCESS   = 1;
+  FILE      = 2;
+  NETWORK   = 3;
+  AUTH      = 4;
+  REGISTRY  = 5;
+  SYSTEM    = 6;
+}
+
+message ProcessEvent {
+  uint32 pid         = 1;
+  uint32 parent_pid  = 2;
+  string name        = 3;
+  string exe_path    = 4;
+  string command_line = 5;
+  string user        = 6;
+  uint64 memory_bytes = 7;
+  float  cpu_percent  = 8;
+  string action       = 9;  // "create" | "terminate"
+  string sha256       = 10;
+  google.protobuf.Timestamp start_time = 11;
+}
+
+message FileEvent {
+  string path      = 1;
+  string action    = 2;  // "create" | "modify" | "delete" | "rename"
+  string sha256    = 3;
+  uint64 size      = 4;
+  string old_path  = 5;  // for renames
+}
+
+message NetworkEvent {
+  string source_ip    = 1;
+  uint32 source_port  = 2;
+  string dest_ip      = 3;
+  uint32 dest_port    = 4;
+  string protocol     = 5;
+  string state        = 6;
+  uint32 process_id   = 7;
+  uint64 bytes_sent   = 8;
+  uint64 bytes_recv   = 9;
+  string dns_query    = 10;
+}
+
+message AuthEvent {
+  string event_type   = 1;  // "login" | "logout" | "sudo" | "failed_login"
+  string username     = 2;
+  string source_ip    = 3;
+  bool   success      = 4;
+  string auth_method  = 5;
+}
+
+message RegistryEvent {
+  string hive      = 1;
+  string key_path  = 2;
+  string value_name = 3;
+  string value_data = 4;
+  string action     = 5;  // "create" | "modify" | "delete"
+}
+
+message SystemEvent {
+  string metric_type = 1;  // "cpu" | "memory" | "disk" | "os_info" | "load"
+  map<string, string> metrics = 2;
+}
+
+// ─── Commands (Backend → Agent) ─────────────────────────────────
+
+message AgentCommand {
+  string id           = 1;
+  CommandType type    = 2;
+  map<string, string> parameters = 3;
+  google.protobuf.Timestamp issued_at = 4;
+}
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  UPDATE_POLICY      = 1;
+  COLLECT_ARTIFACT   = 2;
+  ISOLATE_HOST       = 3;
+  KILL_PROCESS       = 4;
+  SCAN_FILE          = 5;
+  UPDATE_RULES       = 6;
+  RESTART_AGENT      = 7;
+  UNINSTALL_AGENT    = 8;
+  // ── Phase 1: Firewall & Network Security ──
+  FIREWALL_LIST      = 9;
+  FIREWALL_ADD       = 10;
+  FIREWALL_EDIT      = 11;
+  FIREWALL_DELETE     = 12;
+  FIREWALL_TOGGLE    = 13;
+  FIREWALL_SNAPSHOT  = 14;
+  QUARANTINE_SET     = 15;
+  TRAFFIC_REDIRECT   = 16;
+}
+
+// ─── Signed Commands (HMAC-SHA256) ──────────────────────────────
+
+message SignedCommand {
+  AgentCommand command       = 1;
+  string       signature     = 2;   // HMAC-SHA256 hex digest
+  string       nonce         = 3;   // replay protection
+  int64        timestamp_ms  = 4;   // millis since epoch
+}
+
+// ─── Firewall Structures ────────────────────────────────────────
+
+message FirewallRuleSpec {
+  string name           = 1;
+  string direction      = 2;  // "inbound" | "outbound"
+  string action         = 3;  // "allow" | "block"
+  string protocol       = 4;  // "tcp" | "udp" | "icmp" | "any"
+  string port           = 5;
+  string remote_address = 6;
+  bool   enabled        = 7;
+  string profile        = 8;  // "domain" | "private" | "public" | "any"
+}
+
+message FirewallSnapshot {
+  repeated FirewallRuleSpec rules = 1;
+  int32  total          = 2;
+  string agent_id       = 3;
+  string os_type        = 4;
+  google.protobuf.Timestamp captured_at = 5;
+}
+
+enum QuarantineLevel {
+  QUARANTINE_LEVEL_UNSPECIFIED = 0;
+  QUARANTINE_NONE       = 1;   // normal connectivity
+  QUARANTINE_PARTIAL    = 2;   // block all except backend comms
+  QUARANTINE_FULL       = 3;   // block everything except heartbeat
+}
+
+// ─── Policy (pushed from backend) ───────────────────────────────
+
+message AgentPolicy {
+  uint32 heartbeat_interval  = 1;
+  uint32 batch_size          = 2;
+  CollectorPolicy collectors = 3;
+  repeated DetectionRule rules = 4;
+  repeated string watch_paths = 5;
+}
+
+message CollectorPolicy {
+  bool   enable_process      = 1;
+  uint32 process_interval    = 2;
+  bool   enable_filesystem   = 3;
+  uint32 filesystem_interval = 4;
+  bool   enable_network      = 5;
+  uint32 network_interval    = 6;
+  bool   enable_sysinfo      = 7;
+  uint32 sysinfo_interval    = 8;
+}
+
+message DetectionRule {
+  string id              = 1;
+  string name            = 2;
+  string description     = 3;
+  Severity severity      = 4;
+  string mitre_technique = 5;
+  string rule_json       = 6;  // serialised rule logic
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  LOW      = 1;
+  MEDIUM   = 2;
+  HIGH     = 3;
+  CRITICAL = 4;
+}
+
+// ─── Alert (local detections pushed to backend) ─────────────────
+
+message LocalAlert {
+  string rule_id          = 1;
+  string rule_name        = 2;
+  Severity severity       = 3;
+  string mitre_technique  = 4;
+  TelemetryEvent event    = 5;
+  string context_json     = 6;
+  google.protobuf.Timestamp detected_at = 7;
+}
+
+// ─── gRPC Service Definition ────────────────────────────────────
+
+service SentinelAgentService {
+  // Agent lifecycle
+  rpc Register (AgentRegistrationRequest) returns (AgentRegistrationResponse);
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Telemetry ingestion
+  rpc SendTelemetry (TelemetryBatch) returns (TelemetryAck);
+  rpc StreamTelemetry (stream TelemetryEvent) returns (stream TelemetryAck);
+
+  // Alert reporting
+  rpc ReportAlert (LocalAlert) returns (TelemetryAck);
+
+  // Command channel (server-streaming)
+  rpc CommandStream (HeartbeatRequest) returns (stream AgentCommand);
+}

@@ -1,0 +1,53 @@
+# ============================================================
+# SentinelAI Detection Engine — Multi-stage Dockerfile (Rust)
+# ============================================================
+# Consumes normalized telemetry from NATS, runs Sigma rules,
+# IOC matching, and temporal correlation.
+# ============================================================
+
+# ── Stage 1: Build ─────────────────────────────────────────
+FROM rust:1.77-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Cache dependency build
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+    && cargo build --release 2>/dev/null || true \
+    && rm -rf src
+
+# Build the actual service
+COPY . .
+RUN cargo build --release --bin detection-engine 2>/dev/null || cargo build --release
+
+# ── Stage 2: Runtime ───────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+LABEL maintainer="SentinelAI Team"
+LABEL description="SentinelAI Detection Engine (Sigma + IOC + Correlation)"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r sentinel && useradd -r -g sentinel -d /app -s /bin/false sentinel
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/detection-engine /app/detection-engine 2>/dev/null || true
+COPY --from=builder /build/target/release/sentinel* /app/ 2>/dev/null || true
+
+RUN chmod +x /app/detection-engine 2>/dev/null || true \
+    && chown -R sentinel:sentinel /app
+
+# Mount point for Sigma rules
+VOLUME ["/app/rules"]
+
+USER sentinel
+
+# No external port — subscribes to NATS
+CMD ["/app/detection-engine"]

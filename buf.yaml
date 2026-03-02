@@ -1,0 +1,25 @@
+# ============================================================
+# buf.yaml — Buf configuration for SentinelAI proto files
+# ============================================================
+# Buf is used to lint, format, and compile .proto files.
+# See: https://buf.build/docs/configuration/v2/buf-yaml
+# ============================================================
+
+version: v2
+
+modules:
+  - path: shared/proto
+    name: buf.build/sentinelai/proto-v1
+  - path: docs/architecture/proto
+    name: buf.build/sentinelai/proto-v2
+
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX
+    - SERVICE_SUFFIX
+
+breaking:
+  use:
+    - FILE

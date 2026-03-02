@@ -1,0 +1,28 @@
+# SentinelAI Agent Configuration — Remote Deployment Template
+#
+# Replace SENTINEL_SERVER_IP with the IP of your SentinelAI server
+# (the machine running the backend + panel).
+
+# Backend Connection
+backend_url = "http://SENTINEL_SERVER_IP:8000/api/v1"
+# auth_token = ""             # Populated automatically after first registration
+
+# Timing
+heartbeat_interval_secs = 15
+telemetry_batch_size = 50
+
+# Collectors
+[collectors]
+process_enabled = true
+filesystem_enabled = true
+network_enabled = true
+system_info_enabled = true
+process_interval_secs = 10
+network_interval_secs = 15
+system_info_interval_secs = 30
+
+# Watched Paths (Linux defaults — adjust per target OS)
+watch_paths = ["/home", "/tmp", "/etc", "/var/log"]
+
+# File Hash Extensions
+hash_extensions = ["exe", "dll", "sys", "bat", "cmd", "ps1", "vbs", "js", "sh", "py", "elf", "so"]

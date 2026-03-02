@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #050505;
+  --foreground: #e2e8f0;
+  --brand: #dc2626;
+  --brand-light: #ef4444;
+  --brand-glow: #ff1a1a;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Share Tech Mono", monospace;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #dc2626;
+  box-shadow: 0 0 6px rgba(220, 38, 38, 0.4);
+}
+
+/* ── Component classes ── */
+@layer components {
+  .card-cyber {
+    @apply bg-cyber-card border border-cyber-border rounded-xl p-6 backdrop-blur-sm;
+  }
+
+  .severity-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+  .severity-critical { @apply bg-red-500/20 text-red-400 border border-red-500/30; }
+  .severity-high { @apply bg-orange-500/20 text-orange-400 border border-orange-500/30; }
+  .severity-medium { @apply bg-yellow-500/20 text-yellow-400 border border-yellow-500/30; }
+  .severity-low { @apply bg-blue-500/20 text-blue-400 border border-blue-500/30; }
+  .severity-info { @apply bg-gray-500/20 text-gray-400 border border-gray-500/30; }
+
+  .btn-primary {
+    @apply bg-sentinel-600 hover:bg-sentinel-700 text-white px-4 py-2 rounded-lg
+           font-medium transition-all duration-200 shadow-lg shadow-sentinel-600/10;
+  }
+  .btn-secondary {
+    @apply bg-cyber-card border border-cyber-border text-cyber-muted hover:text-white
+           hover:border-sentinel-600/50 px-4 py-2 rounded-lg font-medium transition-all duration-200;
+  }
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg
+           font-medium transition-all duration-200;
+  }
+
+  .glow-red {
+    box-shadow: 0 0 20px rgb(220 38 38 / 0.25), 0 0 60px rgb(220 38 38 / 0.08);
+  }
+  .glow-sentinel {
+    box-shadow: 0 0 20px rgb(220 38 38 / 0.15);
+  }
+
+  .input-terminal {
+    @apply w-full bg-cyber-bg border border-cyber-border rounded-lg px-4 py-2.5
+           text-sm text-white placeholder-cyber-muted/50
+           focus:border-sentinel-600 focus:outline-none focus:ring-1 focus:ring-sentinel-600/30
+           transition-colors;
+  }
+}
+
+/* ── Animations ── */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+
+@keyframes alert-flash {
+  0% { background-color: rgba(220, 38, 38, 0.08); }
+  100% { background-color: transparent; }
+}
+.alert-highlight { animation: alert-flash 3s ease-out; }
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ── Scanline overlay ── */
+.scanline-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(220, 38, 38, 0.015) 2px,
+    rgba(220, 38, 38, 0.015) 4px
+  );
+}
