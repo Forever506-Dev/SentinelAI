@@ -635,8 +635,10 @@ export interface TrackedRulesFilterParams {
 }
 
 export interface TrackedFirewallRuleResponse {
-  rule: TrackedFirewallRule;
-  approval_required?: boolean;
+  status: string;
+  output?: string;
+  remediation_id?: string;
+  agent_id?: string;
   approval_id?: string;
 }
 
