@@ -365,8 +365,18 @@ class ApiClient {
   }
 
   // --- Firewall Management (Phase 1) ---
-  async getTrackedFirewallRules(agentId: string) {
-    return this.request<TrackedFirewallRulesResponse>(`/firewall/${agentId}/rules`);
+  async getTrackedFirewallRules(agentId: string, params?: TrackedRulesFilterParams) {
+    const query = new URLSearchParams();
+    if (params?.page) query.set("page", String(params.page));
+    if (params?.page_size) query.set("page_size", String(params.page_size));
+    if (params?.search) query.set("search", params.search);
+    if (params?.direction) query.set("direction", params.direction);
+    if (params?.action) query.set("action", params.action);
+    if (params?.enabled) query.set("enabled", params.enabled);
+    if (params?.profile) query.set("profile", params.profile);
+    if (params?.sort_by) query.set("sort_by", params.sort_by);
+    if (params?.sort_dir) query.set("sort_dir", params.sort_dir);
+    return this.request<TrackedFirewallRulesResponse>(`/firewall/${agentId}/rules?${query}`);
   }
 
   async createTrackedFirewallRule(agentId: string, rule: CreateTrackedRuleRequest) {
@@ -533,6 +543,7 @@ export interface AddFirewallRuleRequest {
   protocol: "tcp" | "udp" | "any" | "icmp";
   port: string;
   remote_address: string;
+  profiles?: string[];
   reason: string;
 }
 
@@ -554,6 +565,7 @@ export interface EditFirewallRuleRequest {
   protocol?: string;
   port?: string;
   remote_address?: string;
+  profiles?: string[];
   reason?: string;
 }
 
@@ -594,6 +606,7 @@ export interface TrackedFirewallRule {
   remote_address: string | null;
   enabled: boolean;
   profile: string;
+  profiles: string[];
   policy_id: string | null;
   synced_at: string | null;
   drift_detected: boolean;
@@ -604,6 +617,21 @@ export interface TrackedFirewallRule {
 export interface TrackedFirewallRulesResponse {
   rules: TrackedFirewallRule[];
   total: number;
+  page: number;
+  page_size: number;
+  filters_applied: Record<string, string>;
+}
+
+export interface TrackedRulesFilterParams {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  direction?: string;
+  action?: string;
+  enabled?: string;
+  profile?: string;
+  sort_by?: string;
+  sort_dir?: string;
 }
 
 export interface TrackedFirewallRuleResponse {
@@ -621,6 +649,7 @@ export interface CreateTrackedRuleRequest {
   remote_address?: string;
   enabled?: boolean;
   profile?: string;
+  profiles?: string[];
 }
 
 export interface EditTrackedRuleRequest {
@@ -632,6 +661,7 @@ export interface EditTrackedRuleRequest {
   remote_address?: string;
   enabled?: boolean;
   profile?: string;
+  profiles?: string[];
   reason?: string;
 }
 

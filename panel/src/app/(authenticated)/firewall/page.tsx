@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   ShieldCheck, Flame, Plus, Trash2, Loader2, RefreshCw,
   Ban, Network, ArrowDownCircle, ArrowUpCircle, Monitor,
   Clock, CheckCircle, XCircle,
   ToggleLeft, ToggleRight, Camera, FileText,
   ClipboardCheck, AlertTriangle, Shield, Pencil,
+  Search, Filter, X,
 } from "lucide-react";
 import {
   api,
@@ -14,6 +15,7 @@ import {
   FirewallRulesResponse,
   RemediationActionRecord,
   TrackedFirewallRule,
+  TrackedRulesFilterParams,
   PendingApproval,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -28,6 +30,8 @@ const TABS = [
 ] as const;
 
 type TabId = typeof TABS[number]["id"];
+
+const PROFILE_OPTIONS = ["domain", "private", "public"] as const;
 
 const ACTION_COLORS: Record<string, string> = {
   applied: "text-green-400 bg-green-500/10",
@@ -64,9 +68,23 @@ export default function FirewallPage() {
   const [rulesData, setRulesData] = useState<FirewallRulesResponse | null>(null);
   const [rulesLoading, setRulesLoading] = useState(false);
 
+  // Live rules search (client-side filtering)
+  const [liveSearch, setLiveSearch] = useState("");
+
   // Tracked/managed rules
   const [trackedRules, setTrackedRules] = useState<TrackedFirewallRule[]>([]);
+  const [trackedTotal, setTrackedTotal] = useState(0);
   const [trackedLoading, setTrackedLoading] = useState(false);
+
+  // Tracked rules filters (server-side)
+  const [filterSearch, setFilterSearch] = useState("");
+  const [filterDirection, setFilterDirection] = useState("");
+  const [filterAction, setFilterAction] = useState("");
+  const [filterEnabled, setFilterEnabled] = useState("");
+  const [filterProfile, setFilterProfile] = useState("");
+  const [trackedPage, setTrackedPage] = useState(1);
+  const trackedPageSize = 50;
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Add rule form
   const [showAddForm, setShowAddForm] = useState(false);
@@ -76,6 +94,7 @@ export default function FirewallPage() {
   const [formProtocol, setFormProtocol] = useState<"tcp" | "udp" | "any" | "icmp">("tcp");
   const [formPort, setFormPort] = useState("");
   const [formRemoteAddr, setFormRemoteAddr] = useState("");
+  const [formProfiles, setFormProfiles] = useState<string[]>([]);
   const [formReason, setFormReason] = useState("");
   const [formSubmitting, setFormSubmitting] = useState(false);
 
@@ -87,12 +106,13 @@ export default function FirewallPage() {
 
   // Edit rule modal
   const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editingRule, setEditingRule] = useState<{ id?: string; name: string; direction: string; action: string; protocol: string; port: string; remote_address: string; isTracked: boolean } | null>(null);
+  const [editingRule, setEditingRule] = useState<{ id?: string; name: string; direction: string; action: string; protocol: string; port: string; remote_address: string; profiles: string[]; isTracked: boolean } | null>(null);
   const [editAction, setEditAction] = useState<string>("block");
   const [editProtocol, setEditProtocol] = useState<string>("tcp");
   const [editPort, setEditPort] = useState("");
   const [editRemoteAddr, setEditRemoteAddr] = useState("");
   const [editDirection, setEditDirection] = useState<string>("inbound");
+  const [editProfiles, setEditProfiles] = useState<string[]>([]);
   const [editReason, setEditReason] = useState("");
   const [editSubmitting, setEditSubmitting] = useState(false);
 
@@ -107,6 +127,44 @@ export default function FirewallPage() {
 
   // Status messages
   const [statusMsg, setStatusMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  /* ── Debounced search for tracked rules ── */
+  const debouncedFilterLoad = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      setTrackedPage(1);
+      loadTrackedRules();
+    }, 350);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (activeTab === "tracked" && selectedAgent) {
+      debouncedFilterLoad();
+    }
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [filterSearch, filterDirection, filterAction, filterEnabled, filterProfile]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const hasActiveFilters = filterSearch || filterDirection || filterAction || filterEnabled || filterProfile;
+
+  const clearAllFilters = () => {
+    setFilterSearch("");
+    setFilterDirection("");
+    setFilterAction("");
+    setFilterEnabled("");
+    setFilterProfile("");
+    setTrackedPage(1);
+  };
+
+  // Filtered live rules (client-side since they come from the agent)
+  const filteredLiveRules = rulesData?.rules?.filter((rule: any) => {
+    if (!liveSearch.trim()) return true;
+    const q = liveSearch.toLowerCase();
+    const name = (rule.Name || rule.name || "").toLowerCase();
+    const proto = (rule.Protocol || rule.protocol || "").toLowerCase();
+    const port = String(rule.LocalPort || rule.local_port || "").toLowerCase();
+    const remote = (rule.RemoteAddress || rule.remote_address || "").toLowerCase();
+    return name.includes(q) || proto.includes(q) || port.includes(q) || remote.includes(q);
+  }) ?? [];
 
   /* ── Load agents ── */
   useEffect(() => {
@@ -150,12 +208,23 @@ export default function FirewallPage() {
     }
   };
 
-  const loadTrackedRules = async () => {
+  const loadTrackedRules = async (page?: number) => {
     if (!selectedAgent) return;
     setTrackedLoading(true);
     try {
-      const data = await api.getTrackedFirewallRules(selectedAgent);
+      const params: TrackedRulesFilterParams = {
+        page: page ?? trackedPage,
+        page_size: trackedPageSize,
+      };
+      if (filterSearch.trim()) params.search = filterSearch.trim();
+      if (filterDirection) params.direction = filterDirection;
+      if (filterAction) params.action = filterAction;
+      if (filterEnabled) params.enabled = filterEnabled;
+      if (filterProfile) params.profile = filterProfile;
+
+      const data = await api.getTrackedFirewallRules(selectedAgent, params);
       setTrackedRules(data.rules || []);
+      setTrackedTotal(data.total || 0);
     } catch (err: any) {
       setStatusMsg({ type: "error", text: "Failed to load tracked rules: " + (err?.message || String(err)) });
     } finally {
@@ -196,12 +265,13 @@ export default function FirewallPage() {
         protocol: formProtocol,
         port: formPort,
         remote_address: formRemoteAddr,
+        profiles: formProfiles.length ? formProfiles : undefined,
         reason: formReason,
       });
       if (res.status === "completed") {
         setStatusMsg({ type: "success", text: `Rule "${formName || "custom-rule"}" added successfully.` });
         setShowAddForm(false);
-        setFormName(""); setFormPort(""); setFormRemoteAddr(""); setFormReason("");
+        setFormName(""); setFormPort(""); setFormRemoteAddr(""); setFormReason(""); setFormProfiles([]);
         loadLiveRules();
       } else {
         setStatusMsg({ type: "error", text: res.output || "Failed to add rule." });
@@ -245,14 +315,15 @@ export default function FirewallPage() {
 
   const openEditModal = (rule: {
     id?: string; name: string; direction: string; action: string;
-    protocol: string; port: string; remote_address: string; isTracked: boolean;
+    protocol: string; port: string; remote_address: string; profiles?: string[]; isTracked: boolean;
   }) => {
-    setEditingRule(rule);
+    setEditingRule({ ...rule, profiles: rule.profiles || [] });
     setEditAction(rule.action.toLowerCase().includes("block") || rule.action.toLowerCase().includes("drop") ? "block" : "allow");
     setEditProtocol(rule.protocol.toLowerCase() === "any" || rule.protocol === "—" ? "any" : rule.protocol.toLowerCase());
     setEditPort(!rule.port || rule.port.toLowerCase() === "any" || rule.port === "—" ? "" : rule.port);
     setEditRemoteAddr(!rule.remote_address || rule.remote_address.toLowerCase() === "any" || rule.remote_address === "—" ? "" : rule.remote_address);
     setEditDirection(rule.direction.toLowerCase().includes("in") ? "inbound" : "outbound");
+    setEditProfiles(rule.profiles?.length ? [...rule.profiles] : []);
     setEditReason("");
     setEditModalOpen(true);
   };
@@ -270,6 +341,7 @@ export default function FirewallPage() {
           port: editPort || undefined,
           remote_address: editRemoteAddr || undefined,
           direction: editDirection,
+          profiles: editProfiles.length ? editProfiles : undefined,
           reason: editReason || undefined,
         });
         if (res.approval_required) {
@@ -511,7 +583,7 @@ export default function FirewallPage() {
                   <h2 className="text-base font-semibold text-white flex items-center gap-2">
                     <Flame className="w-5 h-5 text-sentinel-400" />
                     Active Firewall Rules
-                    {rulesData && <span className="text-xs text-cyber-muted ml-2">({rulesData.total} rules)</span>}
+                    {rulesData && <span className="text-xs text-cyber-muted ml-2">({filteredLiveRules.length}{liveSearch ? ` / ${rulesData.total}` : ""} rules)</span>}
                   </h2>
                   <div className="flex items-center gap-2">
                     {hasRole("analyst") && (
@@ -577,11 +649,26 @@ export default function FirewallPage() {
                           className="w-full bg-cyber-bg border border-cyber-border rounded-lg px-3 py-2 text-sm text-white placeholder-cyber-muted/50 focus:outline-none focus:border-sentinel-600 mt-1" />
                       </div>
                     </div>
-                    <div className="mb-3">
-                      <label className="text-[10px] text-cyber-muted uppercase">Reason</label>
-                      <input type="text" value={formReason} onChange={(e) => setFormReason(e.target.value)}
-                        placeholder="Why are you adding this rule?"
-                        className="w-full bg-cyber-bg border border-cyber-border rounded-lg px-3 py-2 text-sm text-white placeholder-cyber-muted/50 focus:outline-none focus:border-sentinel-600 mt-1" />
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label className="text-[10px] text-cyber-muted uppercase">Reason</label>
+                        <input type="text" value={formReason} onChange={(e) => setFormReason(e.target.value)}
+                          placeholder="Why are you adding this rule?"
+                          className="w-full bg-cyber-bg border border-cyber-border rounded-lg px-3 py-2 text-sm text-white placeholder-cyber-muted/50 focus:outline-none focus:border-sentinel-600 mt-1" />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-cyber-muted uppercase mb-1 block">Profiles</label>
+                        <div className="flex items-center gap-3 mt-1">
+                          {PROFILE_OPTIONS.map((p) => (
+                            <label key={p} className="flex items-center gap-1.5 text-xs text-cyber-text cursor-pointer">
+                              <input type="checkbox" checked={formProfiles.includes(p)}
+                                onChange={(e) => setFormProfiles(e.target.checked ? [...formProfiles, p] : formProfiles.filter((x) => x !== p))}
+                                className="rounded border-cyber-border bg-cyber-bg text-sentinel-500 focus:ring-sentinel-500 focus:ring-offset-0 w-3.5 h-3.5" />
+                              {p.charAt(0).toUpperCase() + p.slice(1)}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                     <div className="flex gap-2">
                       <button onClick={handleAddRule} disabled={formSubmitting}
@@ -597,13 +684,25 @@ export default function FirewallPage() {
                   </div>
                 )}
 
+                {/* Live rules search */}
+                <div className="px-5 py-2.5 border-b border-cyber-border/50 bg-cyber-bg/30">
+                  <div className="relative max-w-xs">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-cyber-muted pointer-events-none" />
+                    <input
+                      type="text" placeholder="Filter live rules..." value={liveSearch}
+                      onChange={(e) => setLiveSearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-cyber-surface border border-cyber-border rounded-lg text-white placeholder:text-cyber-muted focus:outline-none focus:border-sentinel-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
                 {/* Rules table */}
                 <div className="overflow-x-auto">
                   {rulesLoading ? (
                     <div className="flex items-center justify-center py-12 text-cyber-muted">
                       <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading firewall rules from agent...
                     </div>
-                  ) : rulesData && rulesData.rules.length > 0 ? (
+                  ) : rulesData && filteredLiveRules.length > 0 ? (
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="text-left text-[10px] text-cyber-muted uppercase border-b border-cyber-border">
@@ -618,7 +717,7 @@ export default function FirewallPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {rulesData.rules.map((rule: any, i: number) => {
+                        {filteredLiveRules.map((rule: any, i: number) => {
                           const name = rule.Name || rule.name || rule.chain || "—";
                           const dir = rule.Direction || rule.direction || "—";
                           const act = rule.Action || rule.action || "—";
@@ -693,7 +792,7 @@ export default function FirewallPage() {
                   <h2 className="text-base font-semibold text-white flex items-center gap-2">
                     <Shield className="w-5 h-5 text-sentinel-400" />
                     Managed Rules
-                    <span className="text-xs text-cyber-muted ml-2">({trackedRules.length})</span>
+                    <span className="text-xs text-cyber-muted ml-2">({trackedTotal})</span>
                   </h2>
                   <div className="flex items-center gap-2">
                     {hasRole("analyst") && (
@@ -702,10 +801,63 @@ export default function FirewallPage() {
                         <Camera className="w-3.5 h-3.5" /> Snapshot &amp; Drift
                       </button>
                     )}
-                    <button onClick={loadTrackedRules} disabled={trackedLoading}
+                    <button onClick={() => loadTrackedRules()} disabled={trackedLoading}
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-cyber-bg border border-cyber-border text-cyber-muted rounded-lg text-xs hover:text-white transition-all disabled:opacity-30">
                       <RefreshCw className={`w-3.5 h-3.5 ${trackedLoading ? "animate-spin" : ""}`} /> Refresh
                     </button>
+                  </div>
+                </div>
+
+                {/* ── Filter Bar ── */}
+                <div className="px-5 py-3 border-b border-cyber-border/50 bg-cyber-bg/30">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Search */}
+                    <div className="relative flex-1 min-w-[200px] max-w-xs">
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-cyber-muted pointer-events-none" />
+                      <input
+                        type="text"
+                        placeholder="Search rules..."
+                        value={filterSearch}
+                        onChange={(e) => setFilterSearch(e.target.value)}
+                        className="w-full pl-8 pr-3 py-1.5 text-xs bg-cyber-surface border border-cyber-border rounded-lg text-white placeholder:text-cyber-muted focus:outline-none focus:border-sentinel-500 transition-colors"
+                      />
+                    </div>
+                    {/* Direction */}
+                    <select value={filterDirection} onChange={(e) => setFilterDirection(e.target.value)}
+                      className="px-2.5 py-1.5 text-xs bg-cyber-surface border border-cyber-border rounded-lg text-cyber-text focus:outline-none focus:border-sentinel-500">
+                      <option value="">All Directions</option>
+                      <option value="inbound">Inbound</option>
+                      <option value="outbound">Outbound</option>
+                    </select>
+                    {/* Action */}
+                    <select value={filterAction} onChange={(e) => setFilterAction(e.target.value)}
+                      className="px-2.5 py-1.5 text-xs bg-cyber-surface border border-cyber-border rounded-lg text-cyber-text focus:outline-none focus:border-sentinel-500">
+                      <option value="">All Actions</option>
+                      <option value="block">Block</option>
+                      <option value="allow">Allow</option>
+                    </select>
+                    {/* Enabled */}
+                    <select value={filterEnabled} onChange={(e) => setFilterEnabled(e.target.value)}
+                      className="px-2.5 py-1.5 text-xs bg-cyber-surface border border-cyber-border rounded-lg text-cyber-text focus:outline-none focus:border-sentinel-500">
+                      <option value="">All Status</option>
+                      <option value="true">Active</option>
+                      <option value="false">Disabled</option>
+                    </select>
+                    {/* Profile */}
+                    <select value={filterProfile} onChange={(e) => setFilterProfile(e.target.value)}
+                      className="px-2.5 py-1.5 text-xs bg-cyber-surface border border-cyber-border rounded-lg text-cyber-text focus:outline-none focus:border-sentinel-500">
+                      <option value="">All Profiles</option>
+                      {PROFILE_OPTIONS.map((p) => (
+                        <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+                      ))}
+                    </select>
+                    {/* Clear */}
+                    {hasActiveFilters && (
+                      <button onClick={clearAllFilters}
+                        className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg hover:bg-red-500/20 transition-colors">
+                        <X className="w-3 h-3" /> Clear
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -724,6 +876,7 @@ export default function FirewallPage() {
                           <th className="px-3 py-3">Proto</th>
                           <th className="px-3 py-3">Port</th>
                           <th className="px-3 py-3">Remote</th>
+                          <th className="px-3 py-3">Profiles</th>
                           <th className="px-3 py-3">Version</th>
                           <th className="px-3 py-3">Status</th>
                           {hasRole("analyst") && <th className="px-3 py-3 text-right">Actions</th>}
@@ -743,6 +896,17 @@ export default function FirewallPage() {
                             <td className="px-3 py-2.5 text-xs text-cyber-text">{rule.protocol}</td>
                             <td className="px-3 py-2.5 text-xs font-mono text-cyber-text">{rule.port || "any"}</td>
                             <td className="px-3 py-2.5 text-xs font-mono text-cyber-text">{rule.remote_address || "any"}</td>
+                            <td className="px-3 py-2.5">
+                              <div className="flex flex-wrap gap-1">
+                                {(rule.profiles && rule.profiles.length > 0) ? rule.profiles.map((p: string) => (
+                                  <span key={p} className="text-[10px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-300 rounded border border-indigo-500/20">
+                                    {p}
+                                  </span>
+                                )) : (
+                                  <span className="text-[10px] text-cyber-muted">any</span>
+                                )}
+                              </div>
+                            </td>
                             <td className="px-3 py-2.5 text-xs text-cyber-muted">v{rule.current_version}</td>
                             <td className="px-3 py-2.5">
                               <div className="flex items-center gap-2">
@@ -764,6 +928,7 @@ export default function FirewallPage() {
                                   id: rule.id, name: rule.name, direction: rule.direction,
                                   action: rule.action, protocol: rule.protocol,
                                   port: rule.port || "", remote_address: rule.remote_address || "",
+                                  profiles: rule.profiles || [],
                                   isTracked: true,
                                 })} title="Edit"
                                   className="p-1 text-cyber-muted hover:text-sentinel-400 transition-colors">
@@ -788,11 +953,40 @@ export default function FirewallPage() {
                   ) : (
                     <div className="flex flex-col items-center justify-center py-12 text-cyber-muted">
                       <FileText className="w-8 h-8 mb-2 opacity-30" />
-                      <span className="text-sm">No managed rules yet</span>
-                      <span className="text-xs mt-1">Take a snapshot to start tracking firewall rules</span>
+                      {hasActiveFilters ? (
+                        <>
+                          <span className="text-sm">No rules match filters</span>
+                          <button onClick={clearAllFilters} className="text-xs mt-2 text-sentinel-400 hover:underline">Clear all filters</button>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-sm">No managed rules yet</span>
+                          <span className="text-xs mt-1">Take a snapshot to start tracking firewall rules</span>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
+
+                {/* ── Pagination ── */}
+                {trackedTotal > trackedPageSize && (
+                  <div className="flex items-center justify-between px-5 py-3 border-t border-cyber-border/50 bg-cyber-bg/20">
+                    <span className="text-xs text-cyber-muted">
+                      Showing {(trackedPage - 1) * trackedPageSize + 1}–{Math.min(trackedPage * trackedPageSize, trackedTotal)} of {trackedTotal}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button disabled={trackedPage <= 1} onClick={() => { setTrackedPage(trackedPage - 1); loadTrackedRules(trackedPage - 1); }}
+                        className="px-2.5 py-1 text-xs bg-cyber-surface border border-cyber-border rounded text-cyber-muted hover:text-white disabled:opacity-30 transition-colors">
+                        Prev
+                      </button>
+                      <span className="text-xs text-cyber-muted px-2">Page {trackedPage} / {Math.ceil(trackedTotal / trackedPageSize)}</span>
+                      <button disabled={trackedPage * trackedPageSize >= trackedTotal} onClick={() => { setTrackedPage(trackedPage + 1); loadTrackedRules(trackedPage + 1); }}
+                        className="px-2.5 py-1 text-xs bg-cyber-surface border border-cyber-border rounded text-cyber-muted hover:text-white disabled:opacity-30 transition-colors">
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1001,6 +1195,22 @@ export default function FirewallPage() {
                 <input type="text" value={editRemoteAddr} onChange={(e) => setEditRemoteAddr(e.target.value)}
                   placeholder="e.g. 10.0.0.0/8 or 192.168.1.1 (blank = any)"
                   className="w-full bg-cyber-bg border border-cyber-border rounded-lg px-3 py-2 text-sm text-white placeholder-cyber-muted/50 focus:outline-none focus:border-sentinel-600 mt-1" />
+              </div>
+
+              {/* Profiles */}
+              <div>
+                <label className="text-[10px] text-cyber-muted uppercase tracking-wider mb-2 block">Profiles (Windows)</label>
+                <div className="flex items-center gap-4 mt-1">
+                  {PROFILE_OPTIONS.map((p) => (
+                    <label key={p} className="flex items-center gap-1.5 text-sm text-cyber-text cursor-pointer select-none">
+                      <input type="checkbox" checked={editProfiles.includes(p)}
+                        onChange={(e) => setEditProfiles(e.target.checked ? [...editProfiles, p] : editProfiles.filter((x) => x !== p))}
+                        className="rounded border-cyber-border bg-cyber-bg text-sentinel-500 focus:ring-sentinel-500 focus:ring-offset-0 w-4 h-4" />
+                      {p.charAt(0).toUpperCase() + p.slice(1)}
+                    </label>
+                  ))}
+                </div>
+                <p className="text-[10px] text-cyber-muted mt-1.5">Leave unchecked for &quot;any&quot; profile. Ignored on Linux agents.</p>
               </div>
 
               {/* Reason */}

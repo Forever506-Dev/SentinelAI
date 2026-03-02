@@ -8,8 +8,8 @@ and firewall policies for centralized management.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, Integer, Text, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Index, String, Boolean, DateTime, Integer, Text, ForeignKey
+from sqlalchemy.dialects.postgresql import ARRAY, UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -19,6 +19,10 @@ class FirewallRule(Base):
     """A firewall rule tracked in the database (synced from agent)."""
 
     __tablename__ = "firewall_rules"
+    __table_args__ = (
+        Index("ix_firewall_rules_agent_direction_action", "agent_id", "direction", "action"),
+        Index("ix_firewall_rules_agent_enabled", "agent_id", "enabled"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -46,6 +50,9 @@ class FirewallRule(Base):
     remote_address: Mapped[str] = mapped_column(String(255), nullable=True, default="any")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     profile: Mapped[str] = mapped_column(String(50), nullable=True, default="any")
+    profiles: Mapped[list[str]] = mapped_column(
+        ARRAY(String(20)), nullable=False, server_default="{}", default=list
+    )
 
     # --- Policy Link ---
     policy_id: Mapped[uuid.UUID | None] = mapped_column(

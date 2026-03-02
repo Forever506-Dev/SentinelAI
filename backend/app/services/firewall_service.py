@@ -226,6 +226,18 @@ async def track_rule(
     policy_id: str | None = None,
 ) -> FirewallRule:
     """Track a firewall rule in the database after it's applied to an agent."""
+    # Normalise profiles: accept list or comma-separated string
+    raw_profiles = rule_data.get("profiles", [])
+    if isinstance(raw_profiles, str):
+        raw_profiles = [p.strip().lower() for p in raw_profiles.split(",") if p.strip()]
+    elif not raw_profiles:
+        # Fall back to scalar profile field
+        scalar = rule_data.get("profile", "any")
+        if scalar and scalar.lower() != "any":
+            raw_profiles = [p.strip().lower() for p in scalar.split(",") if p.strip()]
+        else:
+            raw_profiles = []
+
     rule = FirewallRule(
         agent_id=agent_id,
         name=rule_data.get("name", "unknown"),
@@ -238,6 +250,7 @@ async def track_rule(
         remote_address=rule_data.get("remote_address", "any"),
         enabled=rule_data.get("enabled", True),
         profile=rule_data.get("profile", "any"),
+        profiles=raw_profiles,
         policy_id=policy_id,
         synced_at=datetime.now(timezone.utc),
         created_by=user_id,
@@ -285,6 +298,7 @@ async def create_revision(
             "remote_address": rule.remote_address,
             "enabled": rule.enabled,
             "profile": rule.profile,
+            "profiles": rule.profiles or [],
         },
         changed_by=user_id,
         change_reason=reason,
