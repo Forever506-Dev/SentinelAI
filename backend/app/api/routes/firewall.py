@@ -1,0 +1,416 @@
+"""
+Firewall Routes (Phase 1)
+
+Full CRUD for firewall rules with RBAC, HMAC-signed commands,
+approval workflow for destructive actions, drift detection, and policies.
+"""
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select, func, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.security import require_role, sign_command
+from app.core.config import settings
+from app.models.agent import Agent
+from app.models.firewall import FirewallRule, FirewallRuleRevision, FirewallPolicy
+from app.models.remediation import RemediationAction
+from app.schemas.firewall import (
+    FirewallRuleCreate,
+    FirewallRuleUpdate,
+    FirewallRuleResponse,
+    FirewallRuleListResponse,
+    FirewallRuleToggleRequest,
+    FirewallPolicyCreate,
+    FirewallPolicyResponse,
+    FirewallPolicyListResponse,
+    LiveFirewallRulesResponse,
+    FirewallSnapshotResponse,
+)
+from app.services.firewall_service import (
+    relay_signed_command,
+    record_remediation,
+    create_approval_request,
+    track_rule,
+    create_revision,
+    check_self_block,
+)
+
+logger = structlog.get_logger()
+router = APIRouter()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Live Rules (relayed from agent)
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.get("/{agent_id}/live-rules")
+async def get_live_firewall_rules(
+    agent_id: str,
+    current_user: dict = Depends(require_role("viewer")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Fetch live firewall rules from the agent in real time."""
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    cmd_result = await relay_signed_command(agent_id, "firewall_list", {}, timeout_secs=60)
+
+    return {
+        "agent_id": agent_id,
+        "hostname": agent.hostname,
+        "os_type": agent.os_type,
+        "status": cmd_result.get("status", "error"),
+        "output": cmd_result.get("output", ""),
+        "rules": cmd_result.get("data", {}).get("rules", []) if cmd_result.get("data") else [],
+        "total": cmd_result.get("data", {}).get("total", 0) if cmd_result.get("data") else 0,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Tracked Rules CRUD
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.get("/{agent_id}/rules", response_model=FirewallRuleListResponse)
+async def list_tracked_rules(
+    agent_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(require_role("viewer")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """List tracked firewall rules for an agent from the database."""
+    query = (
+        select(FirewallRule)
+        .where(FirewallRule.agent_id == agent_id)
+        .order_by(desc(FirewallRule.created_at))
+    )
+    count_q = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+
+    query = query.offset((page - 1) * page_size).limit(page_size)
+    result = await db.execute(query)
+    rules = result.scalars().all()
+
+    return {"rules": rules, "total": total, "page": page, "page_size": page_size}
+
+
+@router.post("/{agent_id}/rules")
+async def add_firewall_rule(
+    agent_id: str,
+    req: FirewallRuleCreate,
+    current_user: dict = Depends(require_role("analyst")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Add a firewall rule on the agent (analysts+). Signed with HMAC."""
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Self-block prevention
+    if req.action == "block" and check_self_block(req.remote_address):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot block the backend/panel IP address (self-block prevention)",
+        )
+
+    params = {
+        "name": req.name,
+        "direction": req.direction,
+        "action": req.action,
+        "protocol": req.protocol,
+        "port": req.local_port,
+        "remote_address": req.remote_address,
+    }
+
+    cmd_result = await relay_signed_command(agent_id, "firewall_add", params)
+    signature = sign_command(params)
+
+    action = await record_remediation(
+        db, agent_id, "firewall_add", current_user.get("sub"),
+        params, cmd_result, req.reason, signature=signature,
+    )
+
+    # Track in DB if successful
+    if cmd_result.get("status") == "completed":
+        await track_rule(db, agent_id, req.model_dump(), current_user.get("sub"))
+
+    return {
+        "remediation_id": str(action.id),
+        "agent_id": agent_id,
+        "status": cmd_result.get("status", "error"),
+        "output": cmd_result.get("output", ""),
+    }
+
+
+@router.put("/{agent_id}/rules/{rule_id}")
+async def edit_firewall_rule(
+    agent_id: str,
+    rule_id: str,
+    req: FirewallRuleUpdate,
+    current_user: dict = Depends(require_role("analyst")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Edit an existing tracked firewall rule. Requires approval for analysts."""
+    result = await db.execute(
+        select(FirewallRule)
+        .where(FirewallRule.id == rule_id)
+        .where(FirewallRule.agent_id == agent_id)
+    )
+    rule = result.scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Tracked rule not found")
+
+    # Self-block check
+    new_remote = req.remote_address or rule.remote_address
+    new_action = req.action or rule.action
+    if new_action == "block" and check_self_block(new_remote):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot block the backend/panel IP address (self-block prevention)",
+        )
+
+    # Build diff
+    diff = {}
+    updates = req.model_dump(exclude_unset=True, exclude={"reason"})
+    for field, new_val in updates.items():
+        old_val = getattr(rule, field, None)
+        if old_val != new_val:
+            diff[field] = {"old": old_val, "new": new_val}
+            setattr(rule, field, new_val)
+
+    if not diff:
+        return {"status": "no_changes", "output": "No fields changed"}
+
+    user_role = current_user.get("role", "analyst")
+
+    # Analysts need approval for edits; admins+ auto-approve
+    if _role_level(user_role) < _role_level("admin"):
+        # Create pending remediation + approval
+        pending_action = await record_remediation(
+            db, agent_id, "firewall_edit", current_user.get("sub"),
+            {"rule_id": str(rule_id), **updates}, {"status": "pending_approval"},
+            req.reason,
+        )
+        pending_action.status = "pending_approval"
+        approval = await create_approval_request(
+            db, str(pending_action.id), current_user.get("sub"), req.reason,
+        )
+        return {
+            "status": "pending_approval",
+            "approval_id": str(approval.id),
+            "remediation_id": str(pending_action.id),
+            "output": "Edit requires admin approval",
+        }
+
+    # Admin/superadmin: apply immediately
+    params = {"name": rule.name, "direction": rule.direction, "action": rule.action,
+              "protocol": rule.protocol, "port": rule.local_port, "remote_address": rule.remote_address}
+    cmd_result = await relay_signed_command(agent_id, "firewall_edit", params)
+    await create_revision(db, rule, diff, current_user.get("sub"), req.reason)
+    action = await record_remediation(
+        db, agent_id, "firewall_edit", current_user.get("sub"),
+        params, cmd_result, req.reason, rule_id=str(rule_id),
+    )
+
+    return {
+        "remediation_id": str(action.id),
+        "agent_id": agent_id,
+        "status": cmd_result.get("status", "error"),
+        "output": cmd_result.get("output", ""),
+    }
+
+
+@router.delete("/{agent_id}/rules/{rule_id}")
+async def delete_firewall_rule(
+    agent_id: str,
+    rule_id: str,
+    reason: str = Query("", max_length=1000),
+    current_user: dict = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a firewall rule. Admin+ only."""
+    result = await db.execute(
+        select(FirewallRule)
+        .where(FirewallRule.id == rule_id)
+        .where(FirewallRule.agent_id == agent_id)
+    )
+    rule = result.scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Tracked rule not found")
+
+    params = {"name": rule.name}
+    cmd_result = await relay_signed_command(agent_id, "firewall_delete", params)
+    action = await record_remediation(
+        db, agent_id, "firewall_delete", current_user.get("sub"),
+        params, cmd_result, reason, rule_id=str(rule_id),
+    )
+
+    if cmd_result.get("status") == "completed":
+        await db.delete(rule)
+
+    return {
+        "remediation_id": str(action.id),
+        "agent_id": agent_id,
+        "status": cmd_result.get("status", "error"),
+        "output": cmd_result.get("output", ""),
+    }
+
+
+@router.post("/{agent_id}/rules/{rule_id}/toggle")
+async def toggle_firewall_rule(
+    agent_id: str,
+    rule_id: str,
+    req: FirewallRuleToggleRequest,
+    current_user: dict = Depends(require_role("analyst")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Toggle a firewall rule enabled/disabled."""
+    result = await db.execute(
+        select(FirewallRule)
+        .where(FirewallRule.id == rule_id)
+        .where(FirewallRule.agent_id == agent_id)
+    )
+    rule = result.scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Tracked rule not found")
+
+    params = {"name": rule.name, "enabled": req.enabled}
+    cmd_result = await relay_signed_command(agent_id, "firewall_toggle", params)
+
+    if cmd_result.get("status") == "completed":
+        old_enabled = rule.enabled
+        rule.enabled = req.enabled
+        await create_revision(
+            db, rule,
+            {"enabled": {"old": old_enabled, "new": req.enabled}},
+            current_user.get("sub"), req.reason,
+        )
+
+    action = await record_remediation(
+        db, agent_id, "firewall_toggle", current_user.get("sub"),
+        params, cmd_result, req.reason, rule_id=str(rule_id),
+    )
+
+    return {
+        "remediation_id": str(action.id),
+        "agent_id": agent_id,
+        "status": cmd_result.get("status", "error"),
+        "output": cmd_result.get("output", ""),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Snapshot / Drift Detection
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.post("/{agent_id}/snapshot")
+async def snapshot_firewall(
+    agent_id: str,
+    current_user: dict = Depends(require_role("analyst")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Take a live snapshot and compare with tracked rules for drift detection."""
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get live rules
+    cmd_result = await relay_signed_command(agent_id, "firewall_snapshot", {}, timeout_secs=60)
+    live_rules = (
+        cmd_result.get("data", {}).get("rules", [])
+        if cmd_result.get("data")
+        else []
+    )
+
+    # Get tracked rules
+    tracked_result = await db.execute(
+        select(FirewallRule).where(FirewallRule.agent_id == agent_id)
+    )
+    tracked_rules = tracked_result.scalars().all()
+    tracked_by_name = {r.name: r for r in tracked_rules}
+
+    live_names = {r.get("Name", r.get("name", "")) for r in live_rules}
+    tracked_names = set(tracked_by_name.keys())
+
+    new_rules = [r for r in live_rules if r.get("Name", r.get("name", "")) not in tracked_names]
+    missing_rules = [
+        {"name": name, "id": str(tracked_by_name[name].id)}
+        for name in tracked_names - live_names
+    ]
+
+    # Mark drift
+    drift_count = len(new_rules) + len(missing_rules)
+    for rule in tracked_rules:
+        if rule.name in live_names:
+            rule.drift_detected = False
+        else:
+            rule.drift_detected = True
+
+    return {
+        "agent_id": agent_id,
+        "hostname": agent.hostname,
+        "live_rule_count": len(live_rules),
+        "tracked_rule_count": len(tracked_rules),
+        "drift_count": drift_count,
+        "new_rules": new_rules[:50],
+        "missing_rules": missing_rules[:50],
+        "modified_rules": [],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Policies
+# ═══════════════════════════════════════════════════════════════════
+
+
+@router.get("/policies", response_model=FirewallPolicyListResponse)
+async def list_policies(
+    current_user: dict = Depends(require_role("viewer")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """List all firewall policies."""
+    result = await db.execute(
+        select(FirewallPolicy).order_by(desc(FirewallPolicy.created_at))
+    )
+    policies = result.scalars().all()
+    return {"policies": policies, "total": len(policies)}
+
+
+@router.post("/policies")
+async def create_policy(
+    req: FirewallPolicyCreate,
+    current_user: dict = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Create a new firewall policy. Admin+ only."""
+    policy = FirewallPolicy(
+        name=req.name,
+        description=req.description,
+        rules={"rules": [r.model_dump() for r in req.rules]},
+        default_inbound_action=req.default_inbound_action,
+        default_outbound_action=req.default_outbound_action,
+        created_by=current_user.get("sub"),
+    )
+    db.add(policy)
+    await db.flush()
+    return {
+        "id": str(policy.id),
+        "name": policy.name,
+        "status": "created",
+    }
+
+
+# ── Helper: import from security for inline role checks ──────────
+from app.core.security import ROLE_HIERARCHY
+
+def _role_level(role: str) -> int:
+    return ROLE_HIERARCHY.get(role, -1)

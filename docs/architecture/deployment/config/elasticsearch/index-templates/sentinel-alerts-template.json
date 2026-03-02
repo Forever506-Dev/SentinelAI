@@ -1,0 +1,87 @@
+{
+  "index_patterns": ["sentinel-alerts-*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index.number_of_shards": 1,
+      "index.number_of_replicas": 1,
+      "index.refresh_interval": "5s",
+      "index.mapping.total_fields.limit": 120,
+      "index.mapping.depth.limit": 4,
+      "index.lifecycle.name": "sentinel-alerts-ilm",
+      "index.lifecycle.rollover_alias": "sentinel-alerts"
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "alert_id":                { "type": "keyword" },
+        "tenant_id":               { "type": "keyword" },
+        "severity":                { "type": "keyword" },
+        "confidence":              { "type": "float" },
+        "title":                   { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "description":             { "type": "text" },
+        "rule_id":                 { "type": "keyword" },
+        "rule_name":               { "type": "keyword" },
+        "rule_type":               { "type": "keyword" },
+        "detection_source":        { "type": "keyword" },
+
+        "host_guid":               { "type": "keyword" },
+        "hostname":                { "type": "keyword" },
+
+        "process_guid":            { "type": "keyword" },
+        "process_name":            { "type": "keyword" },
+        "command_line":            { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 2048 } } },
+        "exe_path":                { "type": "keyword", "ignore_above": 512 },
+        "parent_process_guid":     { "type": "keyword" },
+
+        "user_id":                 { "type": "keyword" },
+        "username":                { "type": "keyword" },
+        "domain":                  { "type": "keyword" },
+
+        "file_path":               { "type": "keyword", "ignore_above": 512 },
+        "sha256":                  { "type": "keyword" },
+        "dest_ip":                 { "type": "ip" },
+        "dest_port":               { "type": "integer" },
+        "dns_query_name":          { "type": "keyword" },
+
+        "mitre_tactic":            { "type": "keyword" },
+        "mitre_technique":         { "type": "keyword" },
+        "mitre_subtechnique":      { "type": "keyword" },
+        "tags":                    { "type": "keyword" },
+
+        "risk_score":              { "type": "short" },
+
+        "evidence_event_ids": {
+          "type": "keyword"
+        },
+
+        "response_actions": {
+          "type": "nested",
+          "properties": {
+            "action_type":         { "type": "keyword" },
+            "target":              { "type": "keyword" },
+            "status":              { "type": "keyword" },
+            "executed_at":         { "type": "date" },
+            "result":              { "type": "text" }
+          }
+        },
+
+        "status":                  { "type": "keyword" },
+        "assigned_to":             { "type": "keyword" },
+        "notes":                   { "type": "text" },
+
+        "@timestamp":              { "type": "date" },
+        "detected_at":             { "type": "date" },
+        "acknowledged_at":         { "type": "date" },
+        "resolved_at":             { "type": "date" }
+      }
+    },
+    "aliases": {
+      "sentinel-alerts": {}
+    }
+  },
+  "_meta": {
+    "description": "SentinelAI alert events — strict mapping for detection/response tracking",
+    "version": "2.0.0"
+  }
+}

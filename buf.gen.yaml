@@ -1,0 +1,33 @@
+# ============================================================
+# buf.gen.yaml — Code generation configuration
+# ============================================================
+# Generates Python and Rust bindings from .proto files.
+#
+# Usage:
+#   buf generate                          # Generate all
+#   buf generate --path shared/proto      # v1 only
+#   buf generate --path docs/architecture/proto  # v2 only
+#
+# Or use the compile-protos script:
+#   ./scripts/compile-protos.sh
+# ============================================================
+
+version: v2
+
+managed:
+  enabled: true
+
+plugins:
+  # ── Python (protobuf + gRPC) ─────────────────────────────
+  - remote: buf.build/protocolbuffers/python
+    out: gen/python
+    opt: []
+
+  - remote: buf.build/grpc/python
+    out: gen/python
+    opt: []
+
+  # ── Python type stubs (.pyi) ─────────────────────────────
+  - remote: buf.build/protocolbuffers/pyi
+    out: gen/python
+    opt: []

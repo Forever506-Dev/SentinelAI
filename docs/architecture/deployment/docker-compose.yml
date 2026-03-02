@@ -1,0 +1,357 @@
+# SentinelAI Backend — Microservice Deployment Architecture
+#
+# This docker-compose file defines the production microservice topology.
+# Each service is independently scalable and communicates via NATS JetStream.
+#
+# Usage:
+#   Development:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#   Production:   Use Kubernetes manifests (see k8s/ directory) or
+#                 docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+#
+# Services:
+#   1. nats         — NATS JetStream cluster (event bus)
+#   2. ingestion    — Ingestion Gateway (gRPC + mTLS → NATS)
+#   3. detection    — Detection Engine (NATS → rule evaluation → alerts)
+#   4. enrichment   — Enrichment Service (MITRE, CVE, GeoIP, YARA)
+#   5. storage      — Storage Service (NATS → Elasticsearch + PostgreSQL)
+#   6. api          — API Service (REST + WebSocket for Panel)
+#   7. ai           — AI Analysis Service (LLM-powered investigation)
+#   8. enrollment   — Enrollment Service (agent certificate issuance)
+#   9. postgres     — PostgreSQL (relational data)
+#  10. elasticsearch— Elasticsearch (time-series telemetry)
+#  11. redis        — Redis (cache, not pub/sub — NATS replaces that role)
+
+version: "3.9"
+
+x-common-env: &common-env
+  NATS_URL: nats://nats:4222
+  POSTGRES_URL: postgresql+asyncpg://sentinel:${POSTGRES_PASSWORD}@postgres:5432/sentinelai
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+  ELASTICSEARCH_URL: http://elasticsearch:9200
+  LOG_LEVEL: info
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+
+services:
+  # ─── NATS JetStream ───────────────────────────────────────────
+  nats:
+    image: nats:2.10-alpine
+    container_name: sentinel-nats
+    ports:
+      - "4222:4222"   # Client connections
+      - "8222:8222"   # Monitoring
+      - "6222:6222"   # Cluster routing
+    command: >
+      --jetstream
+      --store_dir /data
+      --max_mem_store 2G
+      --max_file_store 50G
+      --config /etc/nats/nats.conf
+    volumes:
+      - nats-data:/data
+      - ./config/nats/nats.conf:/etc/nats/nats.conf:ro
+      - ./certs/nats:/certs:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nats-server", "--signal", "ldm"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── Ingestion Gateway ────────────────────────────────────────
+  # Stateless gRPC server that terminates mTLS, validates agent certs,
+  # decodes protobuf, and publishes to NATS.
+  ingestion:
+    build:
+      context: ../services/ingestion-gateway
+      dockerfile: Dockerfile
+    container_name: sentinel-ingestion
+    ports:
+      - "50051:50051"  # gRPC (mTLS)
+    environment:
+      <<: *common-env
+      GRPC_PORT: 50051
+      TLS_CERT: /certs/server.crt
+      TLS_KEY: /certs/server.key
+      TLS_CA: /certs/ca.crt
+      MAX_EVENTS_PER_AGENT_PER_SEC: 1000
+      NATS_STREAM: TELEMETRY
+    volumes:
+      - ./certs/ingestion:/certs:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  # ─── Detection Engine ─────────────────────────────────────────
+  # Rust service that consumes normalized events from NATS,
+  # evaluates Sigma/YARA rules, performs correlation, and
+  # publishes alerts back to NATS.
+  detection:
+    build:
+      context: ../services/detection-engine
+      dockerfile: Dockerfile
+    container_name: sentinel-detection
+    environment:
+      <<: *common-env
+      NATS_CONSUMER_GROUP: detection-engines
+      NATS_SUBSCRIBE: "TELEMETRY.normalized.>"
+      NATS_PUBLISH_ALERTS: "DETECTION.alerts"
+      NATS_PUBLISH_ENRICHMENT: "ENRICHMENT.requests"
+      RULES_DIR: /rules
+      CORRELATION_WINDOW_SECS: 300
+    volumes:
+      - ./rules/sigma:/rules/sigma:ro
+      - ./rules/yara:/rules/yara:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+
+  # ─── Enrichment Service ───────────────────────────────────────
+  # Python service that enriches events and alerts with:
+  # MITRE ATT&CK details, CVE/NVD data, GeoIP, threat intel.
+  enrichment:
+    build:
+      context: ../services/enrichment
+      dockerfile: Dockerfile
+    container_name: sentinel-enrichment
+    environment:
+      <<: *common-env
+      NATS_CONSUMER_GROUP: enrichment-workers
+      NATS_SUBSCRIBE: "ENRICHMENT.requests.>"
+      NATS_PUBLISH: "TELEMETRY.normalized"
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      MAXMIND_DB: /data/GeoLite2-City.mmdb
+    volumes:
+      - ./data/geoip:/data:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # ─── Storage Service ──────────────────────────────────────────
+  # Consumes events and alerts from NATS, writes to Elasticsearch
+  # (telemetry) and PostgreSQL (alerts, metadata).
+  storage:
+    build:
+      context: ../services/storage
+      dockerfile: Dockerfile
+    container_name: sentinel-storage
+    environment:
+      <<: *common-env
+      NATS_CONSUMER_GROUP: storage-writers
+      NATS_SUBSCRIBE: "TELEMETRY.normalized.>,DETECTION.alerts.>"
+      ES_BULK_SIZE_MB: 5
+      ES_FLUSH_INTERVAL_SECS: 5
+      ES_INDEX_PREFIX: sentinel
+      ES_HOT_DAYS: 30
+      ES_WARM_DAYS: 90
+    depends_on:
+      nats:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1  # Vertical scaling preferred for write path
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  # ─── API Service ──────────────────────────────────────────────
+  # FastAPI REST + WebSocket server for the Panel UI.
+  # Read-only access to Elasticsearch and PostgreSQL.
+  # Subscribes to NATS for real-time alert push to WebSocket.
+  api:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    container_name: sentinel-api
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *common-env
+      API_PORT: 8080
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      NATS_SUBSCRIBE_ALERTS: "DETECTION.alerts.>"
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  # ─── AI Analysis Service ──────────────────────────────────────
+  # Isolated LLM-powered investigation service.
+  # Consumes analysis requests from NATS, runs tool-use loops,
+  # publishes results back.
+  ai:
+    build:
+      context: ../services/ai-analysis
+      dockerfile: Dockerfile
+    container_name: sentinel-ai
+    environment:
+      <<: *common-env
+      NATS_CONSUMER_GROUP: ai-analyzers
+      NATS_SUBSCRIBE: "ANALYSIS.requests.>"
+      NATS_PUBLISH: "ANALYSIS.results"
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MAX_CONCURRENT_ANALYSES: 4
+      MAX_TOOL_ROUNDS: 3
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1  # Scale based on LLM backend capacity
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  # ─── Enrollment Service ───────────────────────────────────────
+  # Handles agent enrollment (CSR signing) and cert rotation.
+  # Separate service to isolate CA key access.
+  enrollment:
+    build:
+      context: ../services/enrollment
+      dockerfile: Dockerfile
+    container_name: sentinel-enrollment
+    ports:
+      - "50052:50052"  # gRPC (TLS, not mTLS — new agents don't have certs yet)
+    environment:
+      <<: *common-env
+      GRPC_PORT: 50052
+      CA_CERT: /ca/ca.crt
+      CA_KEY: /ca/ca.key
+      TLS_CERT: /certs/server.crt
+      TLS_KEY: /certs/server.key
+      CERT_LIFETIME_DAYS: 30
+      ENROLLMENT_TOKEN_SECRET: ${ENROLLMENT_TOKEN_SECRET}
+    volumes:
+      - ./certs/ca:/ca:ro
+      - ./certs/enrollment:/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  # ─── PostgreSQL ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: sentinelai
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Elasticsearch ────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: sentinel-elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - cluster.name=sentinel-cluster
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+      - ./config/elasticsearch/index-templates:/usr/share/elasticsearch/config/templates:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # ─── Redis (cache only — NATS replaces pub/sub role) ──────────
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  nats-data:
+  postgres-data:
+  es-data:
+  redis-data:
+
+networks:
+  default:
+    name: sentinel-network
