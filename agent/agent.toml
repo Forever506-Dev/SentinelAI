@@ -18,8 +18,21 @@ process_interval_secs = 10
 network_interval_secs = 15
 system_info_interval_secs = 30
 
-# Watched Paths (Linux)
-watch_paths = ["/home", "/tmp", "/etc", "/var/log"]
+# Watched Paths
+# Comment/uncomment the line matching your OS, or remove both to use
+# the compiled-in defaults (auto-detected per platform).
+#
+# Windows:
+# watch_paths = ["C:\\Users", "C:\\Windows\\Temp", "C:\\Windows\\System32"]
+#
+# Linux:
+# watch_paths = ["/home", "/tmp", "/etc", "/var/log"]
+#
+# macOS:
+# watch_paths = ["/Users", "/tmp", "/Applications"]
+#
+# When omitted the agent picks sensible defaults at runtime
+# (see config.rs → default_watch_paths).
 
 # File Hash Extensions
 hash_extensions = ["exe", "dll", "sys", "bat", "cmd", "ps1", "vbs", "js", "sh", "py"]
