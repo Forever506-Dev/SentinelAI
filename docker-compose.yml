@@ -1,0 +1,331 @@
+# ============================================================
+# SentinelAI — Unified Docker Compose Stack
+# ============================================================
+#
+# Profiles:
+#   (default)      → postgres, redis, elasticsearch, nats, backend, panel
+#   monitoring     → + kibana
+#   microservices  → + ingestion-gateway, detection-engine, enrichment, enrollment
+#   all            → everything
+#
+# Usage:
+#   docker compose up -d                              # core stack
+#   docker compose --profile monitoring up -d         # + Kibana
+#   docker compose --profile microservices up -d      # + v2 services
+#   docker compose --profile all up -d                # everything
+#   docker compose down                               # stop (keep data)
+#   docker compose down -v                            # stop + destroy data
+#
+# ============================================================
+
+services:
+  # ============================================================
+  # INFRASTRUCTURE — Always started
+  # ============================================================
+
+  # ── PostgreSQL — Primary relational database ───────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinelai-postgres
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sentinelai}
+      POSTGRES_USER: ${POSTGRES_USER:-sentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - sentinelai_postgres_data:/var/lib/postgresql/data
+    networks:
+      - sentinelai-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinelai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis — Caching and real-time features ─────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sentinelai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-sentinel_dev_password}
+    ports:
+      - "6379:6379"
+    volumes:
+      - sentinelai_redis_data:/data
+    networks:
+      - sentinelai-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-sentinel_dev_password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Elasticsearch — Telemetry search and analytics ─────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: sentinelai-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}"
+      - cluster.name=sentinelai
+    ports:
+      - "9200:9200"
+    volumes:
+      - sentinelai_elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - sentinelai-backend
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── NATS JetStream — Event bus (replaces Redis pub/sub) ────
+  nats:
+    image: nats:2.10-alpine
+    container_name: sentinelai-nats
+    restart: unless-stopped
+    command: ["--jetstream", "--store_dir", "/data", "--http_port", "8222"]
+    ports:
+      - "4222:4222"    # Client connections
+      - "8222:8222"    # HTTP monitoring
+    volumes:
+      - sentinelai_nats_data:/data
+    networks:
+      - sentinelai-backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # APPLICATION — Core services
+  # ============================================================
+
+  # ── Backend API — FastAPI monolith ─────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    image: sentinelai-backend:latest
+    container_name: sentinelai-backend
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      ELASTICSEARCH_HOST: http://elasticsearch:9200
+      NATS_URL: nats://nats:4222
+    ports:
+      - "8000:8000"
+    networks:
+      - sentinelai-backend
+      - sentinelai-frontend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Panel — Next.js Web Dashboard ──────────────────────────
+  panel:
+    build:
+      context: ./panel
+      dockerfile: ../docker/Dockerfile.panel
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+    image: sentinelai-panel:latest
+    container_name: sentinelai-panel
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - sentinelai-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================
+  # MONITORING — Profile: monitoring
+  # ============================================================
+
+  # ── Kibana — Elasticsearch visualization ───────────────────
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: sentinelai-kibana
+    restart: unless-stopped
+    profiles: ["monitoring", "all"]
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - sentinelai-backend
+      - sentinelai-frontend
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # ============================================================
+  # MICROSERVICES (v2) — Profile: microservices
+  # ============================================================
+
+  # ── Ingestion Gateway — gRPC mTLS agent terminator ─────────
+  ingestion:
+    build:
+      context: ./docs/architecture/services/ingestion-gateway
+      dockerfile: ../../../../docker/Dockerfile.ingestion
+    image: sentinelai-ingestion:latest
+    container_name: sentinelai-ingestion
+    restart: unless-stopped
+    profiles: ["microservices", "all"]
+    environment:
+      NATS_URL: nats://nats:4222
+      RUST_LOG: info
+    ports:
+      - "50051:50051"
+    networks:
+      - sentinelai-backend
+    depends_on:
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  # ── Detection Engine — Sigma + IOC + Correlation ───────────
+  detection:
+    build:
+      context: ./docs/architecture/services/detection-engine
+      dockerfile: ../../../../docker/Dockerfile.detection
+    image: sentinelai-detection:latest
+    container_name: sentinelai-detection
+    restart: unless-stopped
+    profiles: ["microservices", "all"]
+    environment:
+      NATS_URL: nats://nats:4222
+      RUST_LOG: info
+    volumes:
+      - sentinelai_sigma_rules:/app/rules
+    networks:
+      - sentinelai-backend
+    depends_on:
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+
+  # ── Enrichment Service — GeoIP, MITRE, ThreatIntel ────────
+  enrichment:
+    build:
+      context: ./docs/architecture/services/enrichment-service
+      dockerfile: ../../../../docker/Dockerfile.enrichment
+    image: sentinelai-enrichment:latest
+    container_name: sentinelai-enrichment
+    restart: unless-stopped
+    profiles: ["microservices", "all"]
+    environment:
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://:${REDIS_PASSWORD:-sentinel_dev_password}@redis:6379/0
+      GEOIP_DB_PATH: /app/data/geoip/GeoLite2-City.mmdb
+    volumes:
+      - sentinelai_geoip_data:/app/data/geoip
+    networks:
+      - sentinelai-backend
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # ── Enrollment Service — mTLS CA & Agent Onboarding ────────
+  enrollment:
+    build:
+      context: ./docs/architecture/services/enrollment-service
+      dockerfile: ../../../../docker/Dockerfile.enrollment
+    image: sentinelai-enrollment:latest
+    container_name: sentinelai-enrollment
+    restart: unless-stopped
+    profiles: ["microservices", "all"]
+    environment:
+      NATS_URL: nats://nats:4222
+      ENROLLMENT_CA_KEY_PASSWORD: ${ENROLLMENT_CA_KEY_PASSWORD:-}
+    ports:
+      - "50052:50052"
+    volumes:
+      - sentinelai_certs:/app/certs
+    networks:
+      - sentinelai-backend
+    depends_on:
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+# ============================================================
+# Networks
+# ============================================================
+networks:
+  sentinelai-backend:
+    name: sentinelai-backend
+    driver: bridge
+  sentinelai-frontend:
+    name: sentinelai-frontend
+    driver: bridge
+
+# ============================================================
+# Volumes — All explicitly named for easy identification
+# ============================================================
+volumes:
+  sentinelai_postgres_data:
+    name: sentinelai_postgres_data
+  sentinelai_redis_data:
+    name: sentinelai_redis_data
+  sentinelai_elasticsearch_data:
+    name: sentinelai_elasticsearch_data
+  sentinelai_nats_data:
+    name: sentinelai_nats_data
+  sentinelai_sigma_rules:
+    name: sentinelai_sigma_rules
+  sentinelai_geoip_data:
+    name: sentinelai_geoip_data
+  sentinelai_certs:
+    name: sentinelai_certs

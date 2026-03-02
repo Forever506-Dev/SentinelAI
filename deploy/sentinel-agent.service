@@ -1,0 +1,31 @@
+[Unit]
+Description=SentinelAI Endpoint Agent
+Documentation=https://github.com/your-org/sentinelai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/sentinelai/sentinel-agent
+WorkingDirectory=/opt/sentinelai
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-agent
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ReadWritePaths=/opt/sentinelai /tmp
+ProtectHome=read-only
+PrivateTmp=true
+
+# Allow reading /proc for process monitoring
+ProcSubset=all
+
+# Environment (override backend URL if needed)
+# Environment=SENTINEL_BACKEND_URL=http://192.168.x.x:8000/api/v1
+
+[Install]
+WantedBy=multi-user.target

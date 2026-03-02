@@ -1,0 +1,31 @@
+{
+  "name": "sentinel-desktop",
+  "version": "0.1.0",
+  "description": "SentinelAI EDR — Desktop Management Console (Tauri shell wrapping the panel)",
+  "private": true,
+  "scripts": {
+    "panel:dev": "cd ../panel && npm run dev",
+    "panel:build": "cd ../panel && npm run build",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "npm run panel:build && tauri build",
+    "dev": "tauri dev",
+    "build": "npm run panel:build && tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "@tauri-apps/plugin-notification": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-os": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "note": "This package is a thin Tauri shell. All UI/React/Next.js dependencies live in ../panel. The Tauri build consumes the panel's .next output directly via frontendDist in tauri.conf.json."
+}
