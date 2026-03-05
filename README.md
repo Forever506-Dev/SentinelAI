@@ -24,7 +24,6 @@
 
 <br/>
 
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-blue?style=flat-square)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-brightgreen?style=flat-square)
 
@@ -343,8 +342,6 @@ All firewall commands are **signed with HMAC-SHA256** to prevent unauthorized ex
 <br/>
 
 ## 📝 License
-
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
 
 <br/>
 
