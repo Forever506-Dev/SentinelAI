@@ -150,7 +150,7 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <span className="text-cyber-muted">Model:</span>
-                  <span className="text-white ml-2">{process.env.NEXT_PUBLIC_OLLAMA_MODEL || "bjoernb/claude-opus-4-5"}</span>
+                  <span className="text-white ml-2">{process.env.NEXT_PUBLIC_OLLAMA_MODEL || "mistral:7b"}</span>
                 </div>
                 <div className="col-span-2">
                   <span className="text-cyber-muted">Status:</span>

@@ -32,18 +32,16 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "CHANGE-ME-IN-PRODUCTION-USE-openssl-rand-hex-32"
 
     # --- CORS & Hosts ---
-    # Allow local + LAN origins so remote browsers and agents can connect
+    # Override via CORS_ORIGINS env var (JSON array) for LAN/remote access.
+    # Example: CORS_ORIGINS='["http://192.168.1.100:3000"]'
     CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:8000",
         "http://localhost:8080",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:8080",
-        "http://192.168.2.83:3000",
-        "http://192.168.2.83:8000",
-        # Wildcard fallback — set to ["*"] in dev if needed
     ]
-    ALLOWED_HOSTS: list[str] = ["localhost", "127.0.0.1", "192.168.2.83"]
+    ALLOWED_HOSTS: list[str] = ["localhost", "127.0.0.1"]
 
     # --- PostgreSQL ---
     POSTGRES_HOST: str = "localhost"
@@ -86,7 +84,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "bjoernb/claude-opus-4-5"
+    OLLAMA_MODEL: str = "mistral:7b"
 
     # --- NVD / Vulnerability Database ---
     NVD_API_KEY: str = ""

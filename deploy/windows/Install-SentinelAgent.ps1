@@ -11,7 +11,7 @@
     The IP address of your SentinelAI server (backend + panel host).
 
 .EXAMPLE
-    .\Install-SentinelAgent.ps1 -ServerIP 192.168.2.83
+    .\Install-SentinelAgent.ps1 -ServerIP <YOUR_SERVER_IP>
 #>
 
 param(

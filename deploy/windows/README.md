@@ -22,7 +22,7 @@
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\Install-SentinelAgent.ps1 -ServerIP 192.168.2.83
+.\Install-SentinelAgent.ps1 -ServerIP <YOUR_SERVER_IP>
 ```
 
 > **The agent will:**

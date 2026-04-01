@@ -6,7 +6,7 @@
 #   ./install_agent.sh <SERVER_IP>
 #
 # Example:
-#   ./install_agent.sh 192.168.2.83
+#   ./install_agent.sh <YOUR_SERVER_IP>
 #
 # This script:
 #   1. Creates /opt/sentinelai/
@@ -21,7 +21,7 @@ set -euo pipefail
 SERVER_IP="${1:-}"
 if [[ -z "$SERVER_IP" ]]; then
     echo "Usage: $0 <SENTINEL_SERVER_IP>"
-    echo "  e.g. $0 192.168.2.83"
+    echo "  e.g. $0 <YOUR_SERVER_IP>"
     exit 1
 fi
 

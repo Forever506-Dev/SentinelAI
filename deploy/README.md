@@ -68,7 +68,7 @@ ssh user@REMOTE_IP
 
 # Run the installer (replace with your server's LAN IP)
 cd /tmp/sentinelai-deploy
-sudo ./install_agent.sh 192.168.2.83
+sudo ./install_agent.sh <YOUR_SERVER_IP>
 ```
 
 > **The agent will:**
