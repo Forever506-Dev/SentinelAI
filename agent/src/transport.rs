@@ -301,7 +301,7 @@ impl BackendClient {
             .map(|(_, _)| System::host_name().unwrap_or_else(|| "unknown".into()));
 
         let payload = HeartbeatPayload {
-            cpu_usage: sys.global_cpu_info().cpu_usage(),
+            cpu_usage: sys.global_cpu_usage(),
             memory_usage: if total_mem > 0.0 { (used_mem / total_mem) * 100.0 } else { 0.0 },
             disk_usage: disk_pct,
             uptime_seconds: System::uptime(),

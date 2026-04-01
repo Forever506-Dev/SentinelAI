@@ -6,7 +6,7 @@
 use chrono::Utc;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sysinfo::{System, Pid};
+use sysinfo::{System, Pid, ProcessRefreshKind, ProcessesToUpdate};
 use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
@@ -38,7 +38,7 @@ pub async fn collect_processes(
         interval.tick().await;
 
         // Refresh process list
-        sys.refresh_processes();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
 
         let current_pids: std::collections::HashSet<u32> = sys
             .processes()
@@ -65,7 +65,7 @@ pub async fn collect_processes(
                         // Resolve parent process name for process chain detection
                         let parent_name = process.parent()
                             .and_then(|ppid| sys.process(ppid))
-                            .map(|p| p.name().to_string())
+                            .map(|p| p.name().to_string_lossy().into_owned())
                             .unwrap_or_default();
 
                         // cmd() can be empty on Windows; fall back to exe path
@@ -76,14 +76,14 @@ pub async fn collect_processes(
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default()
                             } else {
-                                parts.join(" ")
+                                parts.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ")
                             }
                         };
 
                         json!({
                             "event_type": "process",
                             "event_action": "create",
-                            "process_name": process.name(),
+                            "process_name": process.name().to_string_lossy().into_owned(),
                             "process_id": pid,
                             "process_guid": pguid,
                             "parent_process_id": process.parent().map(|p| p.as_u32()),
@@ -102,7 +102,7 @@ pub async fn collect_processes(
 
                 debug!(
                     pid = pid,
-                    name = %process.name(),
+                    name = %process.name().to_string_lossy(),
                     "New process detected"
                 );
 

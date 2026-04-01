@@ -18,7 +18,7 @@ pub async fn collect_system_info(
     interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut sys = System::new_with_specifics(
-        RefreshKind::new()
+        RefreshKind::nothing()
             .with_cpu(CpuRefreshKind::everything())
             .with_memory(MemoryRefreshKind::everything()),
     );
@@ -30,7 +30,7 @@ pub async fn collect_system_info(
         sys.refresh_all();
 
         // ── CPU ─────────────────────────────────────────────────────
-        let global_cpu_usage = sys.global_cpu_info().cpu_usage();
+        let global_cpu_usage = sys.global_cpu_usage();
         let per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
 
         let cpu_event = TelemetryEvent {
@@ -41,7 +41,7 @@ pub async fn collect_system_info(
             data: json!({
                 "global_usage_pct": global_cpu_usage,
                 "per_core_usage_pct": per_core,
-                "physical_core_count": sys.physical_core_count(),
+                "physical_core_count": System::physical_core_count(),
                 "cpu_count": sys.cpus().len(),
                 "cpu_brand": sys.cpus().first().map(|c| c.brand().to_string()),
             }),

@@ -8,7 +8,7 @@
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sysinfo::{System, Disks, Networks, CpuRefreshKind, MemoryRefreshKind, RefreshKind};
+use sysinfo::{System, Disks, Networks, CpuRefreshKind, MemoryRefreshKind, RefreshKind, ProcessRefreshKind, ProcessesToUpdate};
 use tracing::{info, warn, error};
 
 use crate::transport::AgentCommand;
@@ -224,7 +224,7 @@ fn execute_shell(cmd: &AgentCommand, command_id: &str) -> CommandResult {
 
 fn execute_sysinfo(command_id: &str) -> CommandResult {
     let mut sys = System::new_with_specifics(
-        RefreshKind::new()
+        RefreshKind::nothing()
             .with_cpu(CpuRefreshKind::everything())
             .with_memory(MemoryRefreshKind::everything()),
     );
@@ -272,9 +272,9 @@ fn execute_sysinfo(command_id: &str) -> CommandResult {
         "boot_time": System::boot_time(),
         "cpu": {
             "brand": sys.cpus().first().map(|c| c.brand().to_string()),
-            "physical_cores": sys.physical_core_count(),
+            "physical_cores": System::physical_core_count(),
             "logical_cores": sys.cpus().len(),
-            "global_usage_pct": sys.global_cpu_info().cpu_usage(),
+            "global_usage_pct": sys.global_cpu_usage(),
             "per_core_pct": per_core,
         },
         "memory": {
@@ -298,7 +298,7 @@ fn execute_sysinfo(command_id: &str) -> CommandResult {
     lines.push(format!("CPU: {} ({} cores) @ {:.1}%",
         sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_default(),
         sys.cpus().len(),
-        sys.global_cpu_info().cpu_usage()));
+        sys.global_cpu_usage()));
     lines.push(format!("Memory: {:.1}/{:.1} GB ({:.1}%)",
         used_mem as f64 / 1_073_741_824.0,
         total_mem as f64 / 1_073_741_824.0,
@@ -327,16 +327,16 @@ fn execute_sysinfo(command_id: &str) -> CommandResult {
 
 fn execute_ps(command_id: &str) -> CommandResult {
     let mut sys = System::new();
-    sys.refresh_processes();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
 
     let mut procs: Vec<serde_json::Value> = sys.processes().iter().map(|(pid, p)| {
         json!({
             "pid": pid.as_u32(),
-            "name": p.name(),
+            "name": p.name().to_string_lossy().into_owned(),
             "cpu_pct": p.cpu_usage(),
             "memory_mb": p.memory() as f64 / 1_048_576.0,
             "status": format!("{:?}", p.status()),
-            "cmd": p.cmd().join(" "),
+            "cmd": p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" "),
             "exe": p.exe().map(|e| e.to_string_lossy().to_string()),
             "ppid": p.parent().map(|pp| pp.as_u32()),
             "user": p.user_id().map(|u| format!("{:?}", u)),
