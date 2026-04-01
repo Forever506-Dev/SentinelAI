@@ -1,0 +1,107 @@
+# ============================================================
+# Dependabot — Automated Dependency Updates
+# ============================================================
+# Keeps all package ecosystems up to date and creates
+# pull requests for security patches automatically.
+# Docs: https://docs.github.com/en/code-security/dependabot
+# ============================================================
+
+version: 2
+
+updates:
+  # ── GitHub Actions ─────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+
+  # ── npm — Next.js Panel ────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/panel"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore(panel)"
+    groups:
+      # Bundle all non-breaking Next.js / React updates together
+      nextjs-and-react:
+        patterns:
+          - "next"
+          - "react"
+          - "react-dom"
+          - "@types/react*"
+      # Bundle all Radix UI / shadcn primitives
+      ui-primitives:
+        patterns:
+          - "@radix-ui/*"
+      # Bundle all ESLint / TypeScript tooling
+      dev-tooling:
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+          - "typescript*"
+          - "@types/*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ── pip — FastAPI Backend ──────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(backend)"
+    groups:
+      fastapi-stack:
+        patterns:
+          - "fastapi*"
+          - "uvicorn*"
+          - "pydantic*"
+          - "starlette*"
+      langchain:
+        patterns:
+          - "langchain*"
+          - "openai*"
+          - "anthropic*"
+
+  # ── Cargo — Rust Agent ─────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/agent"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(agent)"
+    groups:
+      # Group minor/patch updates for tokio ecosystem
+      tokio-ecosystem:
+        patterns:
+          - "tokio*"
+          - "hyper*"
+          - "reqwest*"
+          - "tower*"
+        update-types:
+          - "minor"
+          - "patch"
