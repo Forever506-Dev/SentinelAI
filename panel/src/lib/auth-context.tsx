@@ -46,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const token = api.getToken();
     if (token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsAuthenticated(true);
       decodeTokenClaims(token);
     } else if (!PUBLIC_PATHS.includes(pathname)) {

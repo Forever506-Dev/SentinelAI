@@ -51,6 +51,7 @@ export function useWebSocket(onMessage?: MessageHandler) {
       ws.onclose = () => {
         setConnected(false);
         // Auto-reconnect after 3 seconds
+        // eslint-disable-next-line react-hooks/immutability
         reconnectTimer.current = setTimeout(connect, 3000);
       };
 
