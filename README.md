@@ -32,7 +32,21 @@
 
 <br/>
 
-[![SentinelAI EDR Demo](https://raw.githubusercontent.com/Forever506-Dev/SentinelAI_V3/main/assets/demo/SentinelAI-Demo.png)](https://osullivanquebecqcca-my.sharepoint.com/:v:/g/personal/viroussel_osullivan-quebec_qc_ca/IQBTaa7Ey4ZLQbW8gyAiFE02AW8TcxitLFDIpc1GnGnPDxc)
+<div align="center">
+
+<a href="https://www.youtube.com/watch?v=YOUR_VIDEO_ID">
+  <img src="https://img.youtube.com/vi/YOUR_VIDEO_ID/maxresdefault.jpg" alt="Watch SentinelAI Demo on YouTube" width="700" />
+</a>
+
+<br/>
+
+[![▶ Watch Full Demo on YouTube](https://img.shields.io/badge/▶%20Watch%20Full%20Demo-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=YOUR_VIDEO_ID)
+
+</div>
+
+<br/>
+
+![SentinelAI Platform](https://raw.githubusercontent.com/Forever506-Dev/SentinelAI_V3/main/assets/demo/SentinelAI-Demo.png)
 
 <br/>
 
