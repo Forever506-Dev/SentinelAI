@@ -21,7 +21,7 @@ fn process_guid(agent_id: &str, pid: u32, start_time: u64) -> String {
     hasher.update(pid.to_le_bytes());
     hasher.update(start_time.to_le_bytes());
     let result = hasher.finalize();
-    format!("{:x}", result)[..32].to_string()
+    hex::encode(result)[..32].to_string()
 }
 
 /// Continuously monitor processes at the given interval.

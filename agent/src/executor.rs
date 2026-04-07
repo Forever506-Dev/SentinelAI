@@ -75,10 +75,10 @@ fn validate_shell_command(shell_cmd: &str) -> Result<(), String> {
 /// Verify HMAC-SHA256 signature on a command's parameters.
 /// Returns Ok(()) if valid, Err(message) if invalid or missing.
 fn verify_command_signature(params: &serde_json::Value, hmac_key: &str) -> Result<(), String> {
-    use hmac::{Hmac, Mac};
+    use hmac::{SimpleHmac, Mac, KeyInit};
     use sha2::Sha256;
 
-    type HmacSha256 = Hmac<Sha256>;
+    type HmacSha256 = SimpleHmac<Sha256>;
 
     let signature = params.get("_signature")
         .and_then(|v| v.as_str())
@@ -121,7 +121,7 @@ fn verify_command_signature(params: &serde_json::Value, hmac_key: &str) -> Resul
     let canonical = serde_json::to_string(&serde_json::Value::Object(signable))
         .map_err(|e| format!("Failed to canonicalize: {}", e))?;
 
-    // Compute expected signature
+    // Compute expected signature — updated for hmac 0.13 (SimpleHmac + KeyInit)
     let mut mac = HmacSha256::new_from_slice(hmac_key.as_bytes())
         .map_err(|e| format!("Invalid HMAC key: {}", e))?;
     mac.update(canonical.as_bytes());
